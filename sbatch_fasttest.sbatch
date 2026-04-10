@@ -1,4 +1,4 @@
-!/bin/bash
+#!/bin/bash
 #SBATCH --job-name=fastplms_test
 #SBATCH --partition=rondror
 #SBATCH --gres=gpu:1
