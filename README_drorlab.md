@@ -9,17 +9,17 @@ cd <path_to_repo>/FastPLMs
 REMOTE_USER=kormanav
 TAG_DATE=2026.04.0 # YYYY.MM.MICRO change accordingly
 IMAGE_NAME=fastplms
-SIF_REMOT_DEST=/oak/stanford/groups/rondror/software/plms/singularity
+SIF_REMOTE_DEST=/oak/stanford/groups/rondror/software/plms/singularity
 
 SIF_NAME=${IMAGE_NAME}_${TAG_DATE}.sif
 
 git tag $TAG_DATE 
 make
-scp /tmp/${IMAGE_NAME}/${SIF_NAME} ${REMOTE_USER}@dtn.sherlock.stanford.edu:${SIF_REMOT_DEST}
+scp /tmp/${IMAGE_NAME}/${SIF_NAME} ${REMOTE_USER}@dtn.sherlock.stanford.edu:${SIF_REMOTE_DEST}
 ```
 To make the new version the default, update the symlink on a Sherlock machine (adjust according to the parameters you used):
 ```
-# cd to SIF_REMOT_DEST
+# cd to SIF_REMOTE_DEST
 cd oak/stanford/groups/rondror/software/plms/singularity
 # link tagged version (SIF_NAME) as the new main sif (IMAGE_NAME.sif)
 ln -sf fastplms_2026.04.0.sif fastplms.sif
