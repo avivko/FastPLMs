@@ -11,11 +11,17 @@ Stanford Dror-lab helpers to run **FastPLMs** on **Sherlock** with the group **S
 | Piece | Purpose |
 |--------|---------|
 | [`embed.py`](embed.py) | Embed CSV or FASTA → `.pth` or SQLite |
-| [`embedding_loader.py`](embedding_loader.py) | Load `.pth` / `.db` and map full rows → per-residue indices (ESM2, ESMC, E1, DPLM, DPLM2, ANKH) |
+| [`embedding_blob.py`](embedding_blob.py) | Compact SQLite blob decode (**torch-only**; same format as `fastplms.embedding_mixin`) |
+| [`embedding_loader.py`](embedding_loader.py) | Load `.pth` / `.db` → per-residue tensors (standalone: **Python 3 + torch**; see [Embedding loader](#embedding-loader)) |
 | [`finetune.py`](finetune.py) | Train sequence classification / regression / MLM from CSV |
-| [`tests/sbatch_pytest_fast.sbatch`](tests/sbatch_pytest_fast.sbatch) | Slurm: FastPLMs **pytest** GPU slice only |
+| [`tests/sbatch_drorlab_pytest.sbatch`](tests/sbatch_drorlab_pytest.sbatch) | Slurm: **Drorlab** pytests only (`embedding_blob` / `embedding_loader` / `all`) |
+| [`tests/sbatch_pytest_fast.sbatch`](tests/sbatch_pytest_fast.sbatch) | Slurm: FastPLMs **`/app/testing/`** — **fast** GPU slice |
+| [`tests/sbatch_pytest_full.sbatch`](tests/sbatch_pytest_full.sbatch) | Slurm: FastPLMs **`/app/testing/`** — **full** GPU slice (still skips `large` / `structure`) |
 | [`tests/sbatch_drorlab_smoke.sbatch`](tests/sbatch_drorlab_smoke.sbatch) | Slurm: **Drorlab** embed + finetune smoke (see below) |
-| [`tests/run_drorlab_smoke.sh`](tests/run_drorlab_smoke.sh) | Same smoke steps; run inside Docker/Singularity |
+| [`tests/README.md`](tests/README.md) | How to run Drorlab vs FastPLMs pytest locally and on Slurm |
+| [`tests/run_drorlab_smoke.sh`](tests/run_drorlab_smoke.sh) | Smoke (embed + finetune); run inside Docker/Singularity |
+| [`tests/run_drorlab_pytest.sh`](tests/run_drorlab_pytest.sh) | Drorlab pytests; run inside Docker/Singularity (same args as `sbatch_drorlab_pytest`) |
+| [`tests/run_fastplms_pytest_docker.sh`](tests/run_fastplms_pytest_docker.sh) | FastPLMs `/app/testing/` pytest in Docker (`fast` \| `full` slice) |
 | [`sbatch_embed.sbatch`](sbatch_embed.sbatch) | Slurm wrapper for `embed.py` |
 | [`sbatch_finetune.sbatch`](sbatch_finetune.sbatch) | Slurm wrapper for `finetune.py` |
 
@@ -39,6 +45,22 @@ sbatch drorlab_fastplms/tests/sbatch_pytest_fast.sbatch
 ```
 
 Runs: `pytest /app/testing/ -m "gpu and not slow and not large and not structure"`.
+
+**Drorlab pytests** (embedding blob + loader, no full FastPLMs suite):
+
+```bash
+sbatch drorlab_fastplms/tests/sbatch_drorlab_pytest.sbatch embedding_blob
+sbatch drorlab_fastplms/tests/sbatch_drorlab_pytest.sbatch embedding_loader
+sbatch drorlab_fastplms/tests/sbatch_drorlab_pytest.sbatch all
+```
+
+**FastPLMs broader pytest** (still skips `large` and `structure`; allows `slow`):
+
+```bash
+sbatch drorlab_fastplms/tests/sbatch_pytest_full.sbatch
+```
+
+See [`tests/README.md`](tests/README.md) for local `pytest` commands.
 
 ### Drorlab CLI smoke (embed + finetune)
 
@@ -67,6 +89,24 @@ docker run --rm --gpus '"device=0"' \
   -e USE_TF=0 -e USE_TORCH=1 \
   fastplms env PYTHONPATH=/app:/workspace/repo REPO_ROOT=/workspace/repo \
   bash /workspace/repo/drorlab_fastplms/tests/run_drorlab_smoke.sh
+```
+
+**Docker — Drorlab + FastPLMs pytest** (same image; see [`tests/README.md`](tests/README.md)):
+
+```bash
+docker run --rm \
+  -v "$(pwd)":/workspace/repo -v /tmp/fp_ws:/workspace \
+  -e HF_HOME=/workspace/.cache/huggingface -e XDG_CACHE_HOME=/workspace/.cache \
+  -e USE_TF=0 -e USE_TORCH=1 \
+  fastplms env PYTHONPATH=/app:/workspace/repo REPO_ROOT=/workspace/repo \
+  bash /workspace/repo/drorlab_fastplms/tests/run_drorlab_pytest.sh embedding_blob
+
+docker run --rm --gpus '"device=0"' \
+  -v "$(pwd)":/workspace/repo -v /tmp/fp_ws:/workspace \
+  -e HF_HOME=/workspace/.cache/huggingface -e XDG_CACHE_HOME=/workspace/.cache \
+  -e USE_TF=0 -e USE_TORCH=1 \
+  fastplms env PYTHONPATH=/app:/workspace/repo \
+  bash /workspace/repo/drorlab_fastplms/tests/run_fastplms_pytest_docker.sh fast
 ```
 
 Optional: `REPO_ROOT=/path/to/FastPLMs sbatch ...` if you submit from elsewhere.
@@ -162,13 +202,13 @@ When output ends with `.db`, embeddings are written to SQLite table `embeddings`
 - `sequence` (`TEXT PRIMARY KEY`)
 - `embedding` (`BLOB NOT NULL`)
 
-Each `embedding` blob is the **compact** format from `fastplms.embedding_mixin` (same for ESM2, ESMC, E1, DPLM, DPLM2, and ANKH):
+Each `embedding` blob is the **compact** format (same for ESM2, ESMC, E1, DPLM, DPLM2, and ANKH):
 
 - Header: `[version:1][dtype_code:1][ndim:4][shape:4*ndim]`
 - Then raw tensor bytes
 - `dtype_code`: `0=float16`, `1=bfloat16-stored-as-fp16-bytes`, `2=float32`
 
-Decode with `embedding_blob_to_tensor` from `fastplms.embedding_mixin`, or use [`embedding_loader.py`](embedding_loader.py) below.
+Decode with [`embedding_blob.py`](embedding_blob.py) or [`embedding_loader.py`](embedding_loader.py); see [Embedding loader](#embedding-loader).
 
 **`--full-embeddings` row layout (verified on `Synthyra/ESM2-8M`, `Synthyra/ESMplusplus_small`, `Synthyra/Profluent-E1-150M`, `Synthyra/DPLM-150M`, `Synthyra/DPLM2-150M`, `Synthyra/ANKH_base`, `Synthyra/ANKH2_large`, `Synthyra/ANKH3_large`):**
 
@@ -180,7 +220,52 @@ Decode with `embedding_blob_to_tensor` from `fastplms.embedding_mixin`, or use [
 
 So after stripping, **`residue_emb[0]` is always residue #1**, **`residue_emb[4]` is residue #5**, etc.
 
-**Loader helper + CLI** (works for `.db` and `.pth` dicts):
+Full loader API, CLI, and **standalone** use (no `fastplms` import): [Embedding loader](#embedding-loader).
+
+---
+
+## Embedding loader
+
+Load **`.pth`** dicts or **SQLite `.db`** tables (`embeddings(sequence, embedding)`), decode compact blobs, strip model-specific specials, and select residues via **`load_per_residue_embs`**. Implementation lives in [`embedding_blob.py`](embedding_blob.py) (decode only) and [`embedding_loader.py`](embedding_loader.py).
+
+### Standalone module (Python 3 + PyTorch only)
+
+The loader **does not import `fastplms`**. In another repo or venv you only need **`torch`** (stdlib covers `sqlite3` / `struct` / `io`). Copy or submodule the **FastPLMs checkout** and expose the package root—the directory that **contains** the folder `drorlab_fastplms/`—on Python’s import path.
+
+**One-time `sys.path` tweak** (typical when FastPLMs is a git submodule under your project, e.g. `your_repo/third_party/FastPLMs`):
+
+```python
+from pathlib import Path
+import sys
+
+# Directory that CONTAINS `drorlab_fastplms/` (the FastPLMs repo root, not the parent app root).
+_FASTPLMS_ROOT = Path(__file__).resolve().parents[2] / "third_party" / "FastPLMs"  # adjust parents / names
+if str(_FASTPLMS_ROOT) not in sys.path:
+    sys.path.insert(0, str(_FASTPLMS_ROOT))
+
+from drorlab_fastplms.embedding_loader import load_per_residue_embs
+```
+
+Call this **once** at process startup (before any `drorlab_fastplms` import), e.g. from your app’s `main.py` or a small `bootstrap_fastplms_loader.py` that everything imports first.
+
+**Alternative:** set **`PYTHONPATH`** to that same FastPLMs repo root (shell profile, `direnv`, IDE env, or CI) instead of editing `sys.path`.
+
+**Keep in sync:** the compact blob wire format is duplicated from [`fastplms/embedding_mixin.py`](../fastplms/embedding_mixin.py) (`tensor_to_embedding_blob` / `embedding_blob_to_tensor`). If that format changes upstream, update [`embedding_blob.py`](embedding_blob.py) and run:
+
+```bash
+cd /path/to/FastPLMs
+PYTHONPATH=. pytest drorlab_fastplms/tests -m embedding_blob -v
+PYTHONPATH=. pytest drorlab_fastplms/tests -m embedding_loader -v
+PYTHONPATH=. pytest drorlab_fastplms/tests -v
+```
+
+Slurm: [`tests/sbatch_drorlab_pytest.sbatch`](tests/sbatch_drorlab_pytest.sbatch). Full matrix: [`tests/README.md`](tests/README.md).
+
+(`test_parity_with_fastplms_mixin_*` runs when `fastplms.embedding_mixin` is importable.)
+
+### CLI (inspect `.db` / `.pth`)
+
+Works for `.db` and `.pth` dicts; **`--residue-number`** applies to a single **`--sequence`**.
 
 ```bash
 docker run --rm --gpus '"device=0"' \
@@ -193,19 +278,29 @@ docker run --rm --gpus '"device=0"' \
 #   --residue-number 3,8,21
 ```
 
-In Python:
+For **different residue specs per sequence**, use the Python API below (aligned `sequences` + `residue_number_1b`, or `residue_number_by_sequence`).
+
+### Python API
 
 ```python
 from drorlab_fastplms.embedding_loader import load_per_residue_embs
 
-# Single unified API controlled by batch_size:
+# One function: load_per_residue_embs. batch_size=None (default) -> dict in RAM; batch_size>=1 -> stream (seq, tensor).
+
+# Single sequence -> returns a Tensor
+one = load_per_residue_embs(
+    "embeddings.db",
+    sequence="ACDEFG...",
+    family="auto",
+    residue_number_1b=(10, 25),
+)
 
 # 1) batch_size=None (default): load selected entries fully in memory (dict)
 all_or_selected = load_per_residue_embs(
     "embeddings.db",
     sequences=["ACDEFG..."],      # optional; None means all
     family="auto",
-    residue_number_1b=(10, 25),   # optional; int | (start,end) | [list]
+    residue_number_1b=(10, 25),   # optional; int | (start,end) | [list] | slice
     batch_size=None,              # default
 )
 vec = all_or_selected["ACDEFG..."].mean(dim=0)
@@ -227,6 +322,33 @@ for seq, emb in load_per_residue_embs(
     batch_size=2048,
 ):
     do_something = emb.mean(dim=0)
+
+# Different residue spec per sequence: align ``sequences`` with ``residue_number_1b`` (same length).
+# ``slice`` uses 0-based rows on the per-residue matrix (``slice(None, 3)`` ≈ first three residues).
+seqs = ["ACDEFG...", "MKTW...", "GGHQL..."]
+custom = load_per_residue_embs(
+    "embeddings.db",
+    sequences=seqs,
+    residue_number_1b=[1, (2, 25), slice(None, 3)],
+    family="auto",
+    batch_size=None,
+)
+for seq, emb in load_per_residue_embs(
+    "embeddings.db",
+    sequences=seqs,
+    residue_number_1b=[1, (2, 25), slice(None, 3)],
+    family="auto",
+    batch_size=2048,
+):
+    do_something = emb.mean(dim=0)
+
+# Equivalent dict form (optional)
+residue_number_by_sequence = {
+    "ACDEFG...": [3, 8, 21],
+    "MKTW...": (10, 25),
+    "GGHQL...": 5,
+}
+load_per_residue_embs("embeddings.db", residue_number_by_sequence=residue_number_by_sequence)
 ```
 
 For large SQLite datasets (100k+ sequences), use iterator mode (`batch_size>=1`) to avoid loading everything into RAM.
@@ -300,7 +422,11 @@ Templates set `PYTHONPATH=/app:/workspace/repo` so `import drorlab_fastplms` wor
 | Path | Role |
 |------|------|
 | `drorlab_fastplms/embed.py` | Embedding CLI |
+| `drorlab_fastplms/embedding_blob.py` | Standalone compact blob decode (torch-only) |
 | `drorlab_fastplms/embedding_loader.py` | Load `.pth` / `.db`, strip specials → per-residue tensors |
+| `drorlab_fastplms/tests/test_embedding_blob.py` | Pytest `-m embedding_blob`; optional parity vs `fastplms.embedding_mixin` |
+| `drorlab_fastplms/tests/test_embedding_loader.py` | Pytest `-m embedding_loader` |
+| `drorlab_fastplms/tests/README.md` | Pytest markers and Slurm commands |
 | `drorlab_fastplms/finetune.py` | Fine-tuning CLI |
 | `drorlab_fastplms/tests/examples/` | Tiny CSV/FASTA fixtures for Drorlab smoke + docs |
 | `drorlab_fastplms/tests/run_drorlab_smoke.sh` | Drorlab smoke driver (embed + finetune matrix) |

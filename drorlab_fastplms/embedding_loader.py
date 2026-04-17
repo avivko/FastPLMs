@@ -8,7 +8,7 @@ Verified layout for `--full-embeddings` outputs from `embed.py` (EmbeddingMixin)
 - **E1:** stored length is ``len(sequence) + 4`` (``<bos>``, ``1``, residues, ``2``, ``<eos>``).
   Per-residue rows: ``full[2:-2]`` so index ``0`` is residue #1.
 
-SQLite rows use the compact blob format from ``fastplms.embedding_mixin`` (header + raw bytes).
+SQLite rows use the compact blob format decoded by ``drorlab_fastplms.embedding_blob`` (header + raw bytes; same wire format as ``fastplms.embedding_mixin``).
 """
 
 from __future__ import annotations
@@ -26,10 +26,37 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from fastplms.embedding_mixin import embedding_blob_to_tensor
+from drorlab_fastplms.embedding_blob import embedding_blob_to_tensor
 
 ModelFamily = Literal["auto", "esm_tokenizer", "e1", "ankh_single_special"]
 DEFAULT_DB_BATCH_SIZE = 2048
+
+# One residue selection: 1-based int, inclusive (start,end), gather list, slice on residue rows (0-based), or None = all.
+ResidueSpecAtom = Union[int, Tuple[int, int], List[int], slice]
+ResidueSpec = Optional[ResidueSpecAtom]
+
+
+def _is_uniform_range_pair(obj: object) -> bool:
+    """True for ``(start_1b, end_1b)`` inclusive range (two ints), not a parallel spec container."""
+    return isinstance(obj, tuple) and len(obj) == 2 and all(isinstance(x, int) for x in obj)
+
+
+def _is_parallel_spec_list(sequences: Optional[List[str]], residue_number_1b: object) -> bool:
+    """True when ``residue_number_1b`` is a list/tuple aligned 1:1 with ``sequences``.
+
+    A length-2 tuple of ints is always treated as one inclusive range for uniform mode, never as two
+    parallel specs — use ``[a, b]`` if two sequences need single residues ``a`` and ``b``.
+    """
+    if sequences is None or len(sequences) == 0:
+        return False
+    n = len(sequences)
+    if isinstance(residue_number_1b, list):
+        return len(residue_number_1b) == n
+    if isinstance(residue_number_1b, tuple):
+        if _is_uniform_range_pair(residue_number_1b):
+            return False
+        return len(residue_number_1b) == n
+    return False
 
 
 def load_embeddings_pth(path: str) -> Dict[str, torch.Tensor]:
@@ -234,19 +261,22 @@ def _parse_residue_number_cli(spec: str) -> Union[int, Tuple[int, int], List[int
 
 def _apply_residue_number(
     residue_emb: torch.Tensor,
-    residue_number_1b: Optional[Union[int, Tuple[int, int], List[int]]],
+    residue_number_1b: ResidueSpec,
 ) -> torch.Tensor:
-    """Apply optional 1-based residue numbering on residue-aligned embeddings.
+    """Apply optional residue selection on residue-aligned embeddings.
 
     Supported forms:
-    - int: single residue position (returns shape (H,))
-    - tuple(start, end): inclusive range (returns view shape (R, H))
-    - list[int]: specific residue positions (returns gathered tensor)
+    - int: single residue position, 1-based (returns shape (H,))
+    - tuple(start, end): inclusive 1-based range (returns view shape (R, H))
+    - list[int]: specific 1-based residue positions (returns gathered tensor)
+    - slice: row slice on the residue matrix (0-based; e.g. ``slice(None, 3)`` = first three residues)
     """
     if residue_number_1b is None:
         return residue_emb
 
     L = residue_emb.shape[0]
+    if isinstance(residue_number_1b, slice):
+        return residue_emb[residue_number_1b]
     if isinstance(residue_number_1b, int):
         idx = residue_number_1b
         if idx < 1 or idx > L:
@@ -275,7 +305,7 @@ def get_per_residue_embs(
     source: Union[str, Dict[str, torch.Tensor], EmbeddingDBReader],
     sequence: str,
     family: ModelFamily = "auto",
-    residue_number_1b: Optional[Union[int, Tuple[int, int], List[int]]] = None,
+    residue_number_1b: ResidueSpec = None,
 ) -> torch.Tensor:
     """Get per-residue embeddings (or indexed subset) from `.db` / `.pth`.
 
@@ -304,7 +334,7 @@ def iter_per_residue_embs(
     source: Union[str, Dict[str, torch.Tensor], EmbeddingDBReader],
     sequences: List[str],
     family: ModelFamily = "auto",
-    residue_number_1b: Optional[Union[int, Tuple[int, int], List[int]]] = None,
+    residue_number_1b: ResidueSpec = None,
     db_batch_size: int = DEFAULT_DB_BATCH_SIZE,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     """Yield per-residue embeddings for many sequences without loading everything into memory."""
@@ -342,24 +372,151 @@ def iter_per_residue_embs(
         )
 
 
+def _iter_per_residue_embs_ordered_pairs(
+    source: Union[str, Dict[str, torch.Tensor], EmbeddingDBReader],
+    pairs: List[Tuple[str, ResidueSpec]],
+    family: ModelFamily = "auto",
+    db_batch_size: int = DEFAULT_DB_BATCH_SIZE,
+) -> Iterator[Tuple[str, torch.Tensor]]:
+    """Yield (sequence, tensor) in ``pairs`` order; supports duplicate sequence strings with different specs."""
+    if isinstance(source, EmbeddingDBReader):
+        seqs_unique = list(dict.fromkeys(s for s, _ in pairs))
+        full_map: Dict[str, torch.Tensor] = {}
+        for seq, full_emb in source.iter_full_embeddings(seqs_unique, batch_size=db_batch_size):
+            full_map[seq] = full_emb
+        for seq, spec in pairs:
+            if seq not in full_map:
+                raise KeyError(seq)
+            yield seq, _apply_residue_number(
+                _full_embeddings_to_residue_view(full_map[seq], seq, family=family),
+                spec,
+            )
+        return
+
+    if isinstance(source, str):
+        if source.lower().endswith(".db"):
+            with EmbeddingDBReader(source) as db:
+                yield from _iter_per_residue_embs_ordered_pairs(
+                    db, pairs, family=family, db_batch_size=db_batch_size
+                )
+            return
+
+        full = load_embeddings_pth(source)
+        for seq, spec in pairs:
+            full_emb = full[seq]
+            yield seq, _apply_residue_number(
+                _full_embeddings_to_residue_view(full_emb, seq, family=family),
+                spec,
+            )
+        return
+
+    for seq, spec in pairs:
+        full_emb = source[seq]
+        yield seq, _apply_residue_number(
+            _full_embeddings_to_residue_view(full_emb, seq, family=family),
+            spec,
+        )
+
+
 def load_per_residue_embs(
     source: Union[str, Dict[str, torch.Tensor], EmbeddingDBReader],
+    sequence: Optional[str] = None,
     sequences: Optional[List[str]] = None,
     family: ModelFamily = "auto",
-    residue_number_1b: Optional[Union[int, Tuple[int, int], List[int]]] = None,
+    residue_number_1b: Optional[Union[ResidueSpecAtom, List[ResidueSpec], Tuple[ResidueSpec, ...]]] = None,
+    residue_number_by_sequence: Optional[Dict[str, ResidueSpec]] = None,
     batch_size: Optional[int] = None,
-) -> Union[Dict[str, torch.Tensor], Iterator[Tuple[str, torch.Tensor]]]:
-    """Unified loader for per-residue embeddings.
+) -> Union[torch.Tensor, Dict[str, torch.Tensor], Iterator[Tuple[str, torch.Tensor]]]:
+    """Load per-residue embeddings from `.db` / `.pth` (single unified entry point).
 
-    Behavior by `batch_size`:
-    - `None`: load selected entries fully in memory and return `Dict[str, Tensor]`.
-    - `1`: return iterator yielding one sequence at a time.
-    - `>1`: return iterator yielding sequence embeddings from batched fetch/decode.
+    **Single sequence:** pass ``sequence="ACDEF..."`` and optional ``residue_number_1b`` or a
+    one-entry ``residue_number_by_sequence``. Returns a ``Tensor``.
+
+    **Many sequences — uniform residue selection:** pass ``sequences=[...]`` (or ``None`` to load
+    all rows) and ``residue_number_1b`` (same for every sequence). A length-2 tuple of ints is
+    always one inclusive 1-based range, not two parallel specs.
+
+    **Many sequences — different residue per row:** either
+
+    - ``residue_number_by_sequence={seq: spec, ...}`` (optional ``sequences`` filters keys), or
+    - ``sequences=[s0, s1, ...]`` with ``residue_number_1b=[spec0, spec1, ...]`` the same length
+      (list or tuple). Each ``spec`` is an int, ``(start, end)`` inclusive range, ``list[int]``
+      gather, ``slice`` on residue rows (0-based), or ``None`` for full per-residue tensor.
+
+    **batch_size:**
+    - ``None`` (default): return ``Dict[str, Tensor]`` with all requested sequences in memory.
+    - ``1`` or ``>1``: return an iterator ``(sequence, tensor)``. For SQLite, ``batch_size`` is the
+      DB fetch batch size (batched ``IN`` queries or ``fetchmany`` when iterating all rows).
     """
+    if residue_number_1b is not None and residue_number_by_sequence is not None:
+        raise ValueError("Use only one of residue_number_1b or residue_number_by_sequence.")
+
     if batch_size is not None and batch_size <= 0:
         raise ValueError("batch_size must be positive or None")
 
-    # In-memory mode
+    # --- Single-sequence -> Tensor ---
+    if sequence is not None:
+        if sequences is not None:
+            raise ValueError("Pass either sequence=... or sequences=[...], not both.")
+        if residue_number_by_sequence is not None:
+            if sequence not in residue_number_by_sequence:
+                raise KeyError(f"sequence {sequence!r} not in residue_number_by_sequence")
+            rn = residue_number_by_sequence[sequence]
+        else:
+            rn = residue_number_1b
+        return get_per_residue_embs(source, sequence, family=family, residue_number_1b=rn)
+
+    # --- Per-sequence residue specs (dict or aligned list/tuple with sequences) ---
+    eff_by_seq: Optional[Dict[str, ResidueSpec]] = None
+    parallel_list = _is_parallel_spec_list(sequences, residue_number_1b)
+    if residue_number_by_sequence is not None:
+        if len(residue_number_by_sequence) == 0:
+            raise ValueError("residue_number_by_sequence cannot be empty.")
+        eff_by_seq = dict(residue_number_by_sequence)
+    elif parallel_list:
+        assert sequences is not None and isinstance(residue_number_1b, (list, tuple))
+
+    if eff_by_seq is not None or parallel_list:
+        if residue_number_by_sequence is not None:
+            assert eff_by_seq is not None
+            if sequences is None:
+                pairs = list(eff_by_seq.items())
+            else:
+                missing = set(sequences) - set(eff_by_seq.keys())
+                if missing:
+                    raise KeyError(
+                        f"sequences not found in residue_number_by_sequence: {sorted(missing)[:5]}..."
+                    )
+                pairs = [(s, eff_by_seq[s]) for s in sequences]
+        else:
+            assert parallel_list
+            assert sequences is not None and isinstance(residue_number_1b, (list, tuple))
+            pairs = list(zip(sequences, residue_number_1b))
+            if batch_size is None and len(sequences) != len(set(sequences)):
+                raise ValueError(
+                    "Duplicate entries in sequences with batch_size=None (dict result would drop "
+                    "rows): use batch_size>=1 to stream ordered (sequence, tensor) pairs, or use "
+                    "unique sequence keys."
+                )
+
+        if batch_size is None:
+            return {
+                seq: emb
+                for seq, emb in _iter_per_residue_embs_ordered_pairs(
+                    source=source,
+                    pairs=pairs,
+                    family=family,
+                    db_batch_size=DEFAULT_DB_BATCH_SIZE,
+                )
+            }
+        return _iter_per_residue_embs_ordered_pairs(
+            source=source,
+            pairs=pairs,
+            family=family,
+            db_batch_size=batch_size,
+        )
+
+    # --- Uniform residue_number_1b for many sequences ---
     if batch_size is None:
         return load_all_per_residue_embs_in_memory(
             source=source,
@@ -367,7 +524,8 @@ def load_per_residue_embs(
             residue_number_1b=residue_number_1b,
             db_batch_size=DEFAULT_DB_BATCH_SIZE,
         ) if sequences is None else {
-            seq: emb for seq, emb in iter_per_residue_embs(
+            seq: emb
+            for seq, emb in iter_per_residue_embs(
                 source=source,
                 sequences=sequences,
                 family=family,
@@ -376,7 +534,6 @@ def load_per_residue_embs(
             )
         }
 
-    # Iterator mode (batch_size >= 1)
     if sequences is not None:
         return iter_per_residue_embs(
             source=source,
@@ -386,17 +543,19 @@ def load_per_residue_embs(
             db_batch_size=batch_size,
         )
 
-    # No explicit sequence list -> iterate all rows
     if isinstance(source, EmbeddingDBReader):
+
         def _iter_db_all(reader: EmbeddingDBReader) -> Iterator[Tuple[str, torch.Tensor]]:
             for seq, full_emb in reader.iter_all_full_embeddings(batch_size=batch_size):
                 yield seq, _apply_residue_number(
                     _full_embeddings_to_residue_view(full_emb, seq, family=family),
                     residue_number_1b,
                 )
+
         return _iter_db_all(source)
 
     if isinstance(source, str) and source.lower().endswith(".db"):
+
         def _iter_db_all_from_path(path: str) -> Iterator[Tuple[str, torch.Tensor]]:
             with EmbeddingDBReader(path) as db:
                 for seq, full_emb in db.iter_all_full_embeddings(batch_size=batch_size):
@@ -404,9 +563,9 @@ def load_per_residue_embs(
                         _full_embeddings_to_residue_view(full_emb, seq, family=family),
                         residue_number_1b,
                     )
+
         return _iter_db_all_from_path(source)
 
-    # For .pth / dict, "all" iteration still reads in-memory source once.
     full = load_embeddings_pth(source) if isinstance(source, str) else source
 
     def _iter_map_all(m: Dict[str, torch.Tensor]) -> Iterator[Tuple[str, torch.Tensor]]:
@@ -415,28 +574,14 @@ def load_per_residue_embs(
                 _full_embeddings_to_residue_view(full_emb, seq, family=family),
                 residue_number_1b,
             )
+
     return _iter_map_all(full)
-
-
-def get_per_residue_embs_single(
-    source: Union[str, Dict[str, torch.Tensor], EmbeddingDBReader],
-    sequence: str,
-    family: ModelFamily = "auto",
-    residue_number_1b: Optional[Union[int, Tuple[int, int], List[int]]] = None,
-) -> torch.Tensor:
-    """Explicit single-sequence mode (batch size 1)."""
-    return get_per_residue_embs(
-        source=source,
-        sequence=sequence,
-        family=family,
-        residue_number_1b=residue_number_1b,
-    )
 
 
 def load_all_per_residue_embs_in_memory(
     source: Union[str, Dict[str, torch.Tensor], EmbeddingDBReader],
     family: ModelFamily = "auto",
-    residue_number_1b: Optional[Union[int, Tuple[int, int], List[int]]] = None,
+    residue_number_1b: ResidueSpec = None,
     db_batch_size: int = DEFAULT_DB_BATCH_SIZE,
 ) -> Dict[str, torch.Tensor]:
     """Load all entries into memory as per-residue tensors.
@@ -498,7 +643,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
 
     if args.sequence:
         try:
-            t = get_per_residue_embs(args.path, args.sequence, family=args.family)
+            t = load_per_residue_embs(args.path, sequence=args.sequence, family=args.family)
         except KeyError:
             print(f"Sequence not found in {args.path}", file=sys.stderr)
             return 2

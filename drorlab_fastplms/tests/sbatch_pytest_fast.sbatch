@@ -9,7 +9,8 @@
 #SBATCH --output=/oak/stanford/groups/rondror/software/plms/slurm_outs/fastplms_pytest_%j.out
 #SBATCH --error=/oak/stanford/groups/rondror/software/plms/slurm_outs/fastplms_pytest_%j.err
 #
-# FastPLMs GPU pytest slice only (no Drorlab embed/finetune smoke).
+# FastPLMs GPU pytest — **fast** slice (``not slow`` and ``not large``).
+# Related: ``sbatch_pytest_full.sbatch`` (broader FastPLMs slice), ``sbatch_drorlab_pytest.sbatch`` (Drorlab-only).
 # Submit from the FastPLMs repo root, or set REPO_ROOT to the checkout.
 #
 # Optional env: SIF, REPO_ROOT, HF_TOKEN, HUGGING_FACE_HUB_TOKEN
