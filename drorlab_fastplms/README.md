@@ -180,12 +180,6 @@ Decode with `embedding_blob_to_tensor` from `fastplms.embedding_mixin`, or use [
 
 So after stripping, **`residue_emb[0]` is always residue #1**, **`residue_emb[4]` is residue #5**, etc.
 
-Mean over residues `start_1b`…`end_1b` inclusive (1-based positions):
-
-```python
-mean_vec = residue_emb[start_1b - 1 : end_1b].mean(axis=0)
-```
-
 **Loader helper + CLI** (works for `.db` and `.pth` dicts):
 
 ```bash
@@ -193,18 +187,49 @@ docker run --rm --gpus '"device=0"' \
   -v "$(pwd)":/workspace/repo -v /tmp/fp_ws:/workspace \
   fastplms env PYTHONPATH=/app:/workspace/repo \
   python /workspace/repo/drorlab_fastplms/embedding_loader.py \
-  --path /workspace/your.db --sequence YOUR_SEQUENCE --strip --mean-range 10-25
+  --path /workspace/your.db --sequence YOUR_SEQUENCE --residue-number 10-25
+# also supported:
+#   --residue-number 5
+#   --residue-number 3,8,21
 ```
 
 In Python:
 
 ```python
-from drorlab_fastplms.embedding_loader import load_embeddings, full_embeddings_to_residues, mean_residue_range
+from drorlab_fastplms.embedding_loader import load_per_residue_embs
 
-full = load_embeddings("embeddings.db", sequences=["ACDEFG..."])["ACDEFG..."]
-res = full_embeddings_to_residues(full, "ACDEFG...", family="auto")
-vec = mean_residue_range(res, 10, 25)
+# Single unified API controlled by batch_size:
+
+# 1) batch_size=None (default): load selected entries fully in memory (dict)
+all_or_selected = load_per_residue_embs(
+    "embeddings.db",
+    sequences=["ACDEFG..."],      # optional; None means all
+    family="auto",
+    residue_number_1b=(10, 25),   # optional; int | (start,end) | [list]
+    batch_size=None,              # default
+)
+vec = all_or_selected["ACDEFG..."].mean(dim=0)
+
+# 2) batch_size=1: one-at-a-time iterator (minimal memory)
+for seq, emb in load_per_residue_embs(
+    "embeddings.db",
+    sequences=["ACDEFG...", "MKTW...", "GGHQL..."],  # optional; None => iterate all rows
+    family="auto",
+    batch_size=1,
+):
+    do_something = emb.mean(dim=0)
+
+# 3) batch_size>1: batched iterator (fewer queries / better throughput)
+for seq, emb in load_per_residue_embs(
+    "embeddings.db",
+    sequences=["ACDEFG...", "MKTW...", "GGHQL..."],
+    family="auto",
+    batch_size=2048,
+):
+    do_something = emb.mean(dim=0)
 ```
+
+For large SQLite datasets (100k+ sequences), use iterator mode (`batch_size>=1`) to avoid loading everything into RAM.
 
 ---
 
