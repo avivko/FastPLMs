@@ -43,6 +43,11 @@ python "$FT" --model "$ESM2" --train-csv "$EX/finetune_regression_example.csv" \
   --seq-col sequence --task regression --output-dir "$OUT/ft_esm2" \
   "${ATTN[@]}" "${BS_FT[@]}"
 
+echo "=== Drorlab smoke: finetune ESM2 (MLM) ==="
+python "$FT" --model "$ESM2" --train-csv "$EX/finetune_regression_example.csv" \
+  --seq-col sequence --task mlm --output-dir "$OUT/ft_esm2_mlm" \
+  "${ATTN[@]}" "${BS_FT[@]}"
+
 echo "=== Drorlab smoke: finetune ESMC / ESM3-class (regression) ==="
 python "$FT" --model "$ESMC" --train-csv "$EX/finetune_regression_example.csv" \
   --seq-col sequence --task regression --output-dir "$OUT/ft_esmc" \

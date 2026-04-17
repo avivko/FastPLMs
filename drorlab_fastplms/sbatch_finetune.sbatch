@@ -12,7 +12,7 @@
 # Usage:
 #   sbatch drorlab_fastplms/sbatch_finetune.sbatch <MODEL> <TRAIN_CSV> <OUTPUT_DIR> <TASK> [extra finetune.py args...]
 #
-# TASK is regression or classification. For classification, pass e.g. --num-labels 2 in the extra args.
+# TASK is regression, classification, or mlm. For classification, pass e.g. --num-labels 2 in the extra args.
 # Include --seq-col (and optional --label-col, --val-csv, etc.) in the extra args.
 #
 # Example (regression):
@@ -24,6 +24,11 @@
 #   sbatch drorlab_fastplms/sbatch_finetune.sbatch \
 #     Synthyra/ESM2-150M /workspace/data/train.csv /workspace/runs/ft2 classification \
 #     --seq-col sequence --num-labels 2
+#
+# Example (MLM):
+#   sbatch drorlab_fastplms/sbatch_finetune.sbatch \
+#     Synthyra/ESM2-8M /workspace/data/combined.csv /workspace/runs/ft_mlm mlm \
+#     --seq-col full_seq --epochs 3
 #
 # Optional env: SIF, REPO_ROOT, HF_TOKEN, HUGGING_FACE_HUB_TOKEN
 
