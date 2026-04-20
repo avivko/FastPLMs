@@ -47,14 +47,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--output", required=True, help="Output .pth or .db (SQLite)")
     p.add_argument("--pooling", default="mean", help="Comma-separated pooling strategies (default: mean)")
     p.add_argument("--batch-size", type=int, default=8)
-    p.add_argument("--max-len", type=int, default=1024)
+    p.add_argument("--max-len", type=int, default=2048)
     p.add_argument("--full-embeddings", action="store_true", help="Per-residue embeddings in .pth")
     p.add_argument(
         "--attn-backend",
         default="auto",
         help="Attention backend: auto (fastest available: flash→flex→sdpa), sdpa (exact/reproducible), flex, kernels_flash (default: auto)",
     )
-    p.add_argument("--dtype", default="bfloat16", help="Model load dtype: bfloat16, float16, float32")
+    p.add_argument("--dtype", default="float16", help="Model load dtype: bfloat16, float16, float32")
     p.add_argument("--no-entrypoint-setup", action="store_true", help="Skip entrypoint_setup import")
     p.add_argument(
         "--e1-combined-col",
