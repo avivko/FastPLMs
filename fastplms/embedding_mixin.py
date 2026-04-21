@@ -129,12 +129,18 @@ def maybe_compile(model: torch.nn.Module, dynamic: bool = False) -> torch.nn.Mod
 def build_collator(
     tokenizer: PreTrainedTokenizerBase,
     padding: str = 'max_length',
-    max_length: int = 512,
+    max_length: Optional[int] = 512,
+    truncate: bool = True,
 ) -> Callable[[List[str]], Dict[str, torch.Tensor]]:
     def _collate_fn(sequences: List[str]) -> Dict[str, torch.Tensor]:
-        kwargs: Dict[str, Any] = dict(
-            return_tensors="pt", padding=padding, truncation=True, max_length=max_length,
-        )
+        kwargs: Dict[str, Any] = dict(return_tensors="pt", padding=padding)
+        if truncate:
+            kwargs["truncation"] = True
+            kwargs["max_length"] = max_length if max_length is not None else tokenizer.model_max_length
+        else:
+            kwargs["truncation"] = False
+            if padding == "max_length":
+                kwargs["max_length"] = max_length if max_length is not None else tokenizer.model_max_length
         if padding != 'max_length':
             kwargs['pad_to_multiple_of'] = 8
         return tokenizer(sequences, **kwargs)
@@ -460,7 +466,7 @@ class EmbeddingMixin:
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
         batch_size: int = 2,
         max_len: int = 512,
-        truncate: bool = True,
+        truncate: bool = False,
         full_embeddings: bool = False,
         embed_dtype: torch.dtype = torch.float32,
         pooling_types: List[str] = ['mean'],
@@ -470,7 +476,7 @@ class EmbeddingMixin:
         sql_db_path: str = 'embeddings.db',
         save_path: str = 'embeddings.pth',
         fasta_path: Optional[str] = None,
-        padding: str = 'max_length',
+        padding: str = 'longest',
         **kwargs,
     ) -> Optional[Dict[str, torch.Tensor]]:
         """
@@ -499,7 +505,9 @@ class EmbeddingMixin:
         compiled_model = maybe_compile(self, dynamic=dynamic)
 
         if tokenizer_mode:
-            collate_fn = build_collator(tokenizer, padding=padding, max_length=max_len)
+            collate_fn = build_collator(
+                tokenizer, padding=padding, max_length=max_len, truncate=truncate,
+            )
             device = self.device
         else:
             collate_fn = None
