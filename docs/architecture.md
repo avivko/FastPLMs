@@ -7,12 +7,13 @@ FastPLMs provides optimized, HuggingFace-compatible implementations of protein l
 ```
 FastPLMs/
   fastplms/                  # Main package
-    esm2/                    # ESM2 (Meta AI)
-    esm_plusplus/             # ESM++ / ESMC (EvolutionaryScale)
-    e1/                      # E1 (Profluent Bio)
+    ankh/                    # ANKH (Elnaggar Lab)
+    boltz/                   # Boltz2 (structure prediction)
     dplm/                    # DPLM (ByteDance)
     dplm2/                   # DPLM2 (ByteDance)
-    boltz/                   # Boltz2 (structure prediction)
+    e1/                      # E1 (Profluent Bio)
+    esm2/                    # ESM2 (Meta AI)
+    esm_plusplus/            # ESM++ / ESMC (EvolutionaryScale)
     esmfold/                 # ESMFold (structure prediction)
     attention.py             # Shared attention backend code
     embedding_mixin.py       # Shared pooling & embedding utilities
@@ -22,10 +23,17 @@ FastPLMs/
     boltz/                   # Official Boltz
     e1/                      # Official E1
     dplm/                    # Official DPLM
+    esm/                     # Official EvolutionaryScale ESM (sys.path-injected, not pip-installed)
     transformers/            # Official HF transformers
   entrypoint_setup.py        # PyTorch runtime config
   testing/                   # Test suite + benchmarks
-    official/                # Official model loaders for compliance
+    official/                # Official model loaders for compliance / parity
+    test_parity.py           # Rigorous per-family parity suite
+  Dockerfile                 # Monolithic image (legacy)
+  Dockerfile.base            # Shared base image (per-family layout)
+  Dockerfile.<family>        # One per family: esm2, esm_plusplus, e1, dplm, dplm2, ankh
+  build_images.sh            # Builds base + selected family images
+  update_HF.py               # Pushes composite modeling files + weights to HF Hub
   docs/                      # Documentation
 ```
 
@@ -93,10 +101,11 @@ All models share a common attention backend abstraction controlled by `config.at
 
 Each model's attention layer stores an `AttentionBackend` enum and dispatches accordingly. See [Attention Backends](attention_backends.md) for implementation details.
 
-**Backend setting differs by model family:**
+**Backend setting is uniform across families:**
 
-- ESM2, ESM++, E1: Set on the config before calling `from_pretrained`
-- DPLM, DPLM2: Expose a mutable `model.attn_backend` property that propagates to all layers
+- At load time, every family accepts `config.attn_backend = "..."` before `from_pretrained`.
+- At runtime, every family exposes a mutable `model.attn_backend` property whose setter propagates to every attention submodule. Use this to benchmark backends on the same weights without reloading.
+- Exception: ANKH silently resolves `kernels_flash` to `flex` (or `sdpa`), because T5 relative position bias is incompatible with the flash kernels.
 
 ## Entrypoint Setup
 
@@ -113,13 +122,30 @@ This module is imported at the top of standalone scripts (`throughput.py`, `comp
 
 ## Docker Layout
 
-The Dockerfile uses:
+There are two coexisting layouts.
+
+### Per-family layout (recommended)
+
+A shared base image plus one image per model family. This isolates conflicting native deps (notably EvolutionaryScale `esm` vs `fair-esm`, and DPLM's torchtext pin) so each family can be tested against its own native reference without breaking the others.
+
+- `Dockerfile.base` produces `fastplms-base`: CUDA 12.8, Python 3.12, PyTorch 2.11.0, transformers, FastPLMs source at `/app`. No native reference packages.
+- `Dockerfile.<family>` (esm2, esm_plusplus, e1, dplm, dplm2, ankh) layers on top of `fastplms-base` and installs only that family's native reference deps.
+- `build_images.sh` is a convenience script that builds the base then any subset of family images.
+
+`testing/official/<family>.py` provides the `load_official_model(...)` wrapper that the parity tests call. For ESM++, the EvolutionaryScale `esm` package itself is **not** pip-installed (it pins `transformers<4.53.0`); instead `testing/official/__init__.py` injects the in-tree `official/esm` submodule onto `sys.path` at import time.
+
+### Monolithic layout (legacy)
+
+The original top-level `Dockerfile` (image tag `fastplms`) bundles every dep that can coexist into a single image. Used by the broad test suites and throughput benchmarks where per-family isolation isn't needed.
+
+### Common environment
+
+Both layouts use:
 
 - **Base image**: `nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04` with Python 3.12
-- **Source code**: Copied to `/app` (PYTHONPATH=/app)
+- **Source code**: Copied to `/app` (`PYTHONPATH=/app`)
 - **Runtime workdir**: `/workspace` for outputs, caches, and volume mounts
 - **Caches**: `HF_HOME=/workspace/.cache/huggingface`, `TORCH_HOME=/workspace/.cache/torch`
-- **Compliance deps**: Official repos installed via `pip install -e` from `official/` submodules
 
 ## Weight Conversion
 
@@ -130,11 +156,14 @@ Each model family has a `get_*_weights.py` script that:
 3. Exports `config.json`, `pytorch_model.bin`, and the modeling source files
 4. The exported directory can be pushed to HuggingFace via `update_HF.py`
 
-## Compliance Testing
+## Parity & Compliance Testing
 
-Each family has a corresponding module in `testing/official/` (e.g., `testing/official/esm2.py`) that wraps the original model in a standardized interface returning `(model, tokenizer)`. This allows the compliance test suite to load both implementations side-by-side and compare:
+Each family has a corresponding module in `testing/official/` (e.g., `testing/official/esm2.py`) that wraps the original model in a standardized interface returning `(model, tokenizer)`. The parity / compliance suites load both implementations side-by-side and compare:
 
-- **Weight parity**: Bit-exact MSE comparison of state dicts
-- **Forward compliance**: Logits MSE and prediction accuracy across random batches
+- **Tokenizer parity** (`test_parity.py`): vocab, every token id, every special token id
+- **Weight parity**: bit-exact equality of every parameter, with family-specific allowlisted extras (e.g. ANKH's `lm_head.weight`, since native is a T5 encoder without a head)
+- **Forward parity (fp32 + bf16)**: per-layer relative-std AND relative-maxabs hidden-state diff (two complementary metrics so a localized regression can't hide inside a collapsed scalar), `last_hidden_state` absolute + relative maxabs, logits MSE, padding-isolation across SDPA and Flex, end-to-end `embed_dataset` pipeline for every family
+- **Backend consistency**: every family's supported backends (typically SDPA vs Flex vs `kernels_flash`) agree on the fast side to per-backend tolerance; ANKH compares SDPA vs Flex only because kernels_flash silently falls back
+- **Backend setter propagation**: `model.attn_backend = X` actually updates every attention submodule. If this regresses, every backend-parametrized test becomes a no-op.
 
-See [Testing & Benchmarking](testing.md) for details on running compliance tests.
+The parity suite runs per family in its own Docker image (per the per-family layout above). See [Testing & Benchmarking](testing.md) for full details.
