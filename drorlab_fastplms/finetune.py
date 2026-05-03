@@ -46,7 +46,7 @@ from drorlab_fastplms.cli_common import (
     resolve_torch_dtype,
     try_entrypoint_setup,
 )
-from drorlab_fastplms.e1_context import build_e1_row_strings
+from drorlab_fastplms.e1_context import build_e1_row_strings, normalize_e1_multiseq_string
 
 
 def reinit_classifier_head_if_nonfinite(model: torch.nn.Module) -> None:
@@ -413,7 +413,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--epochs", type=int, default=5)
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--lr", type=float, default=1e-4)
-    ap.add_argument("--max-length", type=int, default=1024)
+    ap.add_argument("--max-length", type=int, default=2048)
     ap.add_argument(
         "--attn-backend",
         default="auto",
@@ -493,17 +493,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     if use_e1_multiseq:
 
         def text_fn(row: pd.Series) -> str:
-            return build_e1_row_strings(
-                combined_col=args.e1_combined_col,
-                context_cols=args.e1_context_cols or [],
-                query_col=args.seq_col,
-                row=row.to_dict(),
+            # Do not slice here: multiseq context can exceed --max-length characters; E1
+            # enforces limits in prep_tokens (max positions / sequences), not raw str len.
+            return normalize_e1_multiseq_string(
+                build_e1_row_strings(
+                    combined_col=args.e1_combined_col,
+                    context_cols=args.e1_context_cols or [],
+                    query_col=args.seq_col,
+                    row=row.to_dict(),
+                )
             )
 
     else:
 
         def text_fn(row: pd.Series) -> str:
-            return str(row[args.seq_col])[: args.max_length]
+            raw = str(row[args.seq_col])
+            if e1:
+                return normalize_e1_multiseq_string(raw)
+            return raw[: args.max_length]
 
     train_ds = SequenceTextDataset(train_df, text_fn, args.label_col)
     val_ds = SequenceTextDataset(val_df, text_fn, args.label_col)

@@ -106,6 +106,54 @@ def test_embedding_db_reader_iter(tmp_sqlite_e1_db: str):
 
 
 @pytest.mark.embedding_loader
+def test_e1_multiseq_per_residue_auto(tmp_path: Path):
+    from drorlab_fastplms.embedding_loader import (
+        e1_multiseq_full_token_count,
+        load_per_residue_embs,
+    )
+
+    # Two short context segments + query (matches rhodb-style key shape).
+    key = "ACDEFGHIK,MNPQR,ZZZ"
+    parts = [p.strip() for p in key.split(",") if p.strip()]
+    t = e1_multiseq_full_token_count(parts)
+    h = 8
+    full = torch.arange(t * h, dtype=torch.float32).reshape(t, h)
+    p = tmp_path / "ms.pth"
+    torch.save({key: full}, p)
+    out = load_per_residue_embs(str(p), sequence=key, family="auto", residue_number_1b=None)
+    assert out.shape == (len("ZZZ"), h)
+    # Seg0: 9+4=13 tok; seg1: 5+4=9; query AA rows start at 13+9+2=24 for "ZZZ".
+    assert torch.equal(out, full[24:27])
+
+
+@pytest.mark.embedding_loader
+def test_e1_multiseq_explicit_family_and_residue_range(tmp_path: Path):
+    from drorlab_fastplms.embedding_loader import e1_multiseq_full_token_count, load_per_residue_embs
+
+    key = "AA,BB,CCCC"
+    parts = [p.strip() for p in key.split(",") if p.strip()]
+    t = e1_multiseq_full_token_count(parts)
+    h = 16
+    full = torch.randn(t, h, dtype=torch.float32)
+    p = tmp_path / "ms2.pth"
+    torch.save({key: full}, p)
+    out = load_per_residue_embs(str(p), sequence=key, family="e1_multiseq", residue_number_1b=(2, 3))
+    assert out.shape == (2, h)
+
+
+@pytest.mark.embedding_loader
+def test_e1_single_still_works_with_auto(tmp_path: Path):
+    from drorlab_fastplms.embedding_loader import load_per_residue_embs
+
+    seq = "MKTAY"
+    full = torch.randn(len(seq) + 4, 11, dtype=torch.float32)
+    p = tmp_path / "single.pth"
+    torch.save({seq: full}, p)
+    out = load_per_residue_embs(str(p), sequence=seq, family="auto")
+    assert out.shape == (len(seq), 11)
+
+
+@pytest.mark.embedding_loader
 def test_load_embeddings_pth_roundtrip(tmp_path: Path):
     from drorlab_fastplms.embedding_loader import load_embeddings_pth, load_per_residue_embs
 

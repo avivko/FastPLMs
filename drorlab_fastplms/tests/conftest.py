@@ -12,3 +12,4 @@ def pytest_configure(config: object) -> None:
         "markers",
         "embedding_loader: embedding_loader.py SQLite/.pth and residue APIs.",
     )
+    config.addinivalue_line("markers", "gpu: requires CUDA GPU (E1 embed smoke tests).")

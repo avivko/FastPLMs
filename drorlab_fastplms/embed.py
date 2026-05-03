@@ -26,7 +26,7 @@ from drorlab_fastplms.cli_common import (
     resolve_torch_dtype,
     try_entrypoint_setup,
 )
-from drorlab_fastplms.e1_context import build_e1_row_strings
+from drorlab_fastplms.e1_context import build_e1_row_strings, normalize_e1_multiseq_string
 from drorlab_fastplms.io_utils import load_csv_as_records, load_sequences_csv, load_sequences_fasta
 
 
@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--output", required=True, help="Output .pth or .db (SQLite)")
     p.add_argument("--pooling", default="mean", help="Comma-separated pooling strategies (default: mean)")
     p.add_argument("--batch-size", type=int, default=8)
-    p.add_argument("--max-len", type=int, default=1024)
+    p.add_argument("--max-len", type=int, default=2048)
     p.add_argument("--full-embeddings", action="store_true", help="Per-residue embeddings in .pth")
     p.add_argument(
         "--attn-backend",
@@ -114,6 +114,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"Unsupported input extension {ext!r}; use .csv or .fasta", file=sys.stderr)
         return 2
+
+    if e1:
+        sequences = [normalize_e1_multiseq_string(s) for s in sequences]
 
     out_path = args.output
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)

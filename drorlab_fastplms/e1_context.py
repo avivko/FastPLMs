@@ -5,6 +5,23 @@ from __future__ import annotations
 from typing import List, Sequence
 
 
+def normalize_e1_multiseq_string(s: str) -> str:
+    """
+    Strip each comma-separated segment and drop empties (CSV ``,,`` / stray commas).
+
+    E1 ``prepare_multiseq`` splits on commas only; callers should run this on any
+    user-provided multiseq string before the model sees it.
+    """
+    parts = [p.strip() for p in (s or "").split(",")]
+    parts = [p for p in parts if p]
+    if not parts:
+        raise ValueError(
+            "E1 multi-sequence string has no non-empty segments after comma split "
+            f"(e.g. stray commas only). Original: {s!r}"
+        )
+    return ",".join(parts)
+
+
 def join_e1_multiseq(context_segments: Sequence[str], query: str) -> str:
     """Concatenate context sequence(s) and query for E1 ``prepare_multiseq`` (comma-separated)."""
     parts: List[str] = []

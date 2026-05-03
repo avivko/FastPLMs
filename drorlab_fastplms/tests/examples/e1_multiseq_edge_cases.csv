@@ -1,0 +1,6 @@
+Seq_ID,rag_homolog_context_multiseq,contexted_domain_seq
+1,",MAVL,,GCHK,MWY",MKLL
+2,"  MAVL  ,  GCHK  , MWY  ",NOTE
+3,MKLLACDEFGHIK,GGGG
+4,"MK,VL,GC",WWW
+5,"ACDEF,GHIKL",MNOPQ

@@ -5,8 +5,14 @@ Verified layout for `--full-embeddings` outputs from `embed.py` (EmbeddingMixin)
 
 - **ESM2 / ESMC (tokenizer models):** stored length is ``len(sequence) + 2`` (cls/bos + residues + eos).
   Per-residue rows: ``full[1:-1]`` so index ``0`` is residue #1.
-- **E1:** stored length is ``len(sequence) + 4`` (``<bos>``, ``1``, residues, ``2``, ``<eos>``).
+- **E1 (single protein key):** stored length is ``len(sequence) + 4`` (``<bos>``, ``1``, residues, ``2``, ``<eos>``).
   Per-residue rows: ``full[2:-2]`` so index ``0`` is residue #1.
+- **E1 (multiseq key):** DB key is a comma-separated string ``ctx1,ctx2,...,query`` (same as ``embed.py`` / ``prepare_multiseq``).
+  Stored length is ``sum(len(seg) + 4)`` over segments. Per-residue rows are taken from the **last** segment only (the query),
+  i.e. the same rows as ``full[2:-2]`` would give for that segment in isolation—``residue_number_1b`` is 1-based in the query.
+
+Detection (``family="auto"``): if the key contains a comma, split into non-empty stripped segments; if at least two segments
+and ``T == sum(len(seg)+4)``, treat as E1 multiseq. Otherwise fall back to single-sequence E1 using ``len(key)`` (no comma).
 
 SQLite rows use the compact blob format decoded by ``drorlab_fastplms.embedding_blob`` (header + raw bytes; same wire format as ``fastplms.embedding_mixin``).
 """
@@ -28,8 +34,42 @@ if str(_REPO_ROOT) not in sys.path:
 
 from drorlab_fastplms.embedding_blob import embedding_blob_to_tensor
 
-ModelFamily = Literal["auto", "esm_tokenizer", "e1", "ankh_single_special"]
+ModelFamily = Literal["auto", "esm_tokenizer", "e1", "e1_multiseq", "ankh_single_special"]
 DEFAULT_DB_BATCH_SIZE = 2048
+
+
+def e1_comma_split_segments(sequence: str) -> List[str]:
+    """Non-empty stripped segments of a comma-separated E1 multiseq key (embed.py / ``prepare_multiseq``)."""
+    return [p.strip() for p in (sequence or "").split(",") if p.strip()]
+
+
+def e1_multiseq_full_token_count(segments: List[str]) -> int:
+    """E1 full layout: per segment ``<bos>``, ``1``, AA…, ``2``, ``<eos>`` → ``len(seg) + 4`` tokens."""
+    return sum(len(seg) + 4 for seg in segments)
+
+
+def e1_multiseq_query_aa_row_range(segments: List[str]) -> Tuple[int, int]:
+    """Half-open token row indices ``[start, end)`` for **query amino acids only** (last segment, no boundary tokens)."""
+    if len(segments) < 2:
+        raise ValueError("E1 multiseq requires at least two comma-separated segments.")
+    start = 0
+    for seg in segments[:-1]:
+        start += len(seg) + 4
+    query = segments[-1]
+    n_aa = len(query)
+    # Within last segment: rows 0.. are bos,1, then n_aa residues, then 2,eos
+    aa_start = start + 2
+    aa_end = start + 2 + n_aa
+    return aa_start, aa_end
+
+
+def is_e1_multiseq_full_embedding(sequence: str, num_token_rows: int) -> bool:
+    """True if ``sequence`` looks like an E1 multiseq key and ``num_token_rows`` matches the packed layout."""
+    parts = e1_comma_split_segments(sequence)
+    if len(parts) < 2:
+        return False
+    return num_token_rows == e1_multiseq_full_token_count(parts)
+
 
 # One residue selection: 1-based int, inclusive (start,end), gather list, slice on residue rows (0-based), or None = all.
 ResidueSpecAtom = Union[int, Tuple[int, int], List[int], slice]
@@ -178,11 +218,14 @@ class EmbeddingDBReader:
 
 
 def infer_family(full_emb: torch.Tensor, sequence: str) -> ModelFamily:
-    """Infer tokenizer vs E1 from stored token count (full-embeddings only)."""
+    """Infer tokenizer vs E1 (single or multiseq) from stored token count (full-embeddings only)."""
     if full_emb.ndim != 2:
         raise ValueError(f"Expected 2D per-sequence embedding (T, H), got shape {tuple(full_emb.shape)}")
     L = len(sequence)
     t = full_emb.shape[0]
+    parts = e1_comma_split_segments(sequence)
+    if len(parts) >= 2 and t == e1_multiseq_full_token_count(parts):
+        return "e1_multiseq"
     if t == L + 4:
         return "e1"
     if t == L + 2:
@@ -191,7 +234,8 @@ def infer_family(full_emb: torch.Tensor, sequence: str) -> ModelFamily:
         return "ankh_single_special"
     raise ValueError(
         f"Cannot infer layout: seq_len={L}, stored_tokens={t}. "
-        "Expected L+2 (ESM2/ESMC/DPLM/DPLM2), L+4 (E1), L+1 (ANKH), or L (already residue-only)."
+        "Expected L+2 (ESM2/ESMC/DPLM/DPLM2), L+4 (E1), L+1 (ANKH), L (already residue-only), "
+        "or E1 multiseq: comma-separated segments with T=sum(len(seg)+4)."
     )
 
 
@@ -212,7 +256,24 @@ def _full_embeddings_to_residue_view(
             return full_emb
         family = infer_family(full_emb, sequence)
 
+    if family == "e1_multiseq":
+        parts = e1_comma_split_segments(sequence)
+        if len(parts) < 2:
+            raise ValueError("family=e1_multiseq requires a comma-separated key with at least two segments.")
+        exp = e1_multiseq_full_token_count(parts)
+        if t != exp:
+            raise ValueError(
+                f"E1 multiseq full-embeddings expected T={exp} for {len(parts)} segments, got T={t}. "
+                f"Query segment length={len(parts[-1])}."
+            )
+        a0, a1 = e1_multiseq_query_aa_row_range(parts)
+        return full_emb[a0:a1]
+
     if family == "e1":
+        if is_e1_multiseq_full_embedding(sequence, t):
+            parts = e1_comma_split_segments(sequence)
+            a0, a1 = e1_multiseq_query_aa_row_range(parts)
+            return full_emb[a0:a1]
         if t != L + 4:
             raise ValueError(f"E1 full-embeddings expected T=L+4={L+4}, got T={t}")
         return full_emb[2:-2]
@@ -310,10 +371,13 @@ def get_per_residue_embs(
     """Get per-residue embeddings (or indexed subset) from `.db` / `.pth`.
 
     - `source`: either a path to `.db`/`.pth` or an already-loaded dict.
-    - `sequence`: sequence key.
-    - `family`: special-token layout (`auto` infers from stored length).
-    - `residue_number_1b`: optional 1-based residue number spec:
-      `int` (single residue number), `(start, end)` inclusive range, or `list[int]`.
+    - `sequence`: sequence key (DB row key). For E1 multiseq this is the full comma-separated string;
+      per-residue rows align to the **last** segment (query) only unless you pass ``family="e1_multiseq"``
+      with a matching layout (same behavior as ``auto`` when multiseq is detected).
+    - `family`: special-token layout (`auto` infers; E1 multiseq: comma-separated key and
+      ``T == sum(len(seg)+4)``).
+    - `residue_number_1b`: optional 1-based residue index within the **query protein** for E1 multiseq
+      (same as single E1 for a one-segment key).
     """
     if isinstance(source, EmbeddingDBReader):
         full_emb = source.get_full_embedding(sequence)
@@ -628,9 +692,9 @@ def _main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--sequence", default=None, help="Sequence key to decode")
     p.add_argument(
         "--family",
-        choices=("auto", "esm_tokenizer", "e1", "ankh_single_special"),
+        choices=("auto", "esm_tokenizer", "e1", "e1_multiseq", "ankh_single_special"),
         default="auto",
-        help="How to strip specials (default: infer from lengths)",
+        help="How to strip specials (default: infer from lengths; e1_multiseq = comma-separated E1 query slice)",
     )
     p.add_argument("--strip", action="store_true", help="Print per-residue shape")
     p.add_argument(
@@ -648,7 +712,9 @@ def _main(argv: Optional[List[str]] = None) -> int:
             print(f"Sequence not found in {args.path}", file=sys.stderr)
             return 2
         print("key:", args.sequence)
-        print("per_residue_shape:", tuple(t.shape), "expected_L:", len(args.sequence))
+        q_parts = e1_comma_split_segments(args.sequence)
+        q_aa = len(q_parts[-1]) if q_parts else len(args.sequence)
+        print("per_residue_shape:", tuple(t.shape), "expected_aa_L:", q_aa)
         if args.strip:
             print("strip_mode: enabled")
         if args.residue_number:
