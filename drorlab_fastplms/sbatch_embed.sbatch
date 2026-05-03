@@ -37,6 +37,10 @@ REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-.}}"
 
 mkdir -p "${SCRATCH}/fastplms_workspace"
 
+# Host Conda often sets CC/CXX to conda's cross-compiler; Singularity inherits the login env.
+# Triton JIT then fails compiling launchers (missing x86_64-linux-gnu/python3.12/pyconfig.h).
+unset CC CXX CPPFLAGS CFLAGS LDFLAGS
+
 singularity exec --nv \
   -B "${SCRATCH}/fastplms_workspace:/workspace" \
   -B "${REPO_ROOT}:/workspace/repo" \

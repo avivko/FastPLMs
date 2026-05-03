@@ -52,6 +52,10 @@ REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-.}}"
 mkdir -p "${SCRATCH}/fastplms_workspace"
 mkdir -p "${OUTPUT_DIR}"
 
+
+# Host Conda CC/CXX breaks Triton JIT inside the image; see sbatch_embed.sbatch comment.
+unset CC CXX CPPFLAGS CFLAGS LDFLAGS
+
 singularity exec --nv \
   -B "${SCRATCH}/fastplms_workspace:/workspace" \
   -B "${REPO_ROOT}:/workspace/repo" \
