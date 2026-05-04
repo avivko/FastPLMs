@@ -26,7 +26,11 @@ from drorlab_fastplms.cli_common import (
     resolve_torch_dtype,
     try_entrypoint_setup,
 )
-from drorlab_fastplms.e1_context import build_e1_row_strings, normalize_e1_multiseq_string
+from drorlab_fastplms.e1_context import (
+    build_e1_row_strings,
+    normalize_e1_multiseq_string,
+    validate_e1_embed_inputs,
+)
 from drorlab_fastplms.io_utils import load_csv_as_records, load_sequences_csv, load_sequences_fasta
 
 
@@ -117,6 +121,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if e1:
         sequences = [normalize_e1_multiseq_string(s) for s in sequences]
+        try:
+            validate_e1_embed_inputs(sequences, row_labels=ids)
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 2
 
     out_path = args.output
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)

@@ -46,7 +46,11 @@ from drorlab_fastplms.cli_common import (
     resolve_torch_dtype,
     try_entrypoint_setup,
 )
-from drorlab_fastplms.e1_context import build_e1_row_strings, normalize_e1_multiseq_string
+from drorlab_fastplms.e1_context import (
+    build_e1_row_strings,
+    normalize_e1_multiseq_string,
+    validate_e1_embed_inputs,
+)
 
 
 def reinit_classifier_head_if_nonfinite(model: torch.nn.Module) -> None:
@@ -511,6 +515,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             if e1:
                 return normalize_e1_multiseq_string(raw)
             return raw[: args.max_length]
+
+    if e1:
+        train_texts = [text_fn(train_df.iloc[i]) for i in range(len(train_df))]
+        val_texts = [text_fn(val_df.iloc[i]) for i in range(len(val_df))]
+        try:
+            validate_e1_embed_inputs(
+                train_texts + val_texts,
+                row_labels=[f"train:{i}" for i in range(len(train_texts))]
+                + [f"val:{i}" for i in range(len(val_texts))],
+            )
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 2
 
     train_ds = SequenceTextDataset(train_df, text_fn, args.label_col)
     val_ds = SequenceTextDataset(val_df, text_fn, args.label_col)
