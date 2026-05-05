@@ -62,6 +62,32 @@ def validate_e1_embed_inputs(
                 )
 
 
+def prepare_e1_inputs_for_runtime(
+    sequences: Sequence[str],
+    *,
+    truncate: bool,
+    max_len: int,
+) -> List[str]:
+    """
+    Prepare E1 strings for runtime exactly as embed/finetune intend.
+
+    When truncating raw multiseq strings by character count, a cut can land on a comma
+    and create an empty segment at runtime. To prevent ``prepare_multiseq`` failures,
+    we drop empty comma-separated segments after truncation.
+    """
+    out: List[str] = []
+    for s in sequences:
+        t = s[:max_len] if truncate else s
+        parts = _nonempty_multiseq_parts(t)
+        if not parts:
+            raise ValueError(
+                "After --max-len truncation, an E1 multi-sequence string has no non-empty segments. "
+                "Use a larger --max-len or disable truncation."
+            )
+        out.append(",".join(parts))
+    return out
+
+
 def normalize_e1_multiseq_string(s: str) -> str:
     """
     Strip each comma-separated segment and drop empties (CSV ``,,`` / stray commas).

@@ -49,6 +49,7 @@ from drorlab_fastplms.cli_common import (
 from drorlab_fastplms.e1_context import (
     build_e1_row_strings,
     normalize_e1_multiseq_string,
+    prepare_e1_inputs_for_runtime,
     validate_e1_embed_inputs,
 )
 
@@ -499,7 +500,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         def text_fn(row: pd.Series) -> str:
             # Do not slice here: multiseq context can exceed --max-length characters; E1
             # enforces limits in prep_tokens (max positions / sequences), not raw str len.
-            return normalize_e1_multiseq_string(
+            normalized = normalize_e1_multiseq_string(
                 build_e1_row_strings(
                     combined_col=args.e1_combined_col,
                     context_cols=args.e1_context_cols or [],
@@ -507,13 +508,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                     row=row.to_dict(),
                 )
             )
+            return prepare_e1_inputs_for_runtime([normalized], truncate=False, max_len=args.max_length)[0]
 
     else:
 
         def text_fn(row: pd.Series) -> str:
             raw = str(row[args.seq_col])
             if e1:
-                return normalize_e1_multiseq_string(raw)
+                normalized = normalize_e1_multiseq_string(raw)
+                return prepare_e1_inputs_for_runtime([normalized], truncate=False, max_len=args.max_length)[0]
             return raw[: args.max_length]
 
     if e1:
