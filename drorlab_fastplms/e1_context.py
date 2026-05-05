@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from typing import List, Sequence
 
 # Must match ``E1PreTrainedModel.validate_sequence`` / ``prepare_singleseq`` in ``fastplms/e1/modeling_e1.py``.
@@ -86,6 +87,57 @@ def prepare_e1_inputs_for_runtime(
             )
         out.append(",".join(parts))
     return out
+
+
+def reduce_e1_multiseq_context_to_budget(
+    multiseq: str,
+    *,
+    reduced_max_token_length: int,
+    rng: random.Random,
+) -> tuple[str, bool]:
+    """
+    Randomly drop context segments (keep query as last) until reduced token budget fits.
+
+    Approximation used (per user request): token cost ~= ``n_segments * longest_segment_len``
+    where segments include context + query.
+    """
+    if reduced_max_token_length <= 0:
+        raise ValueError("--e1-reduced-max-token-length must be > 0.")
+
+    parts = _nonempty_multiseq_parts(multiseq)
+    if len(parts) < 2:
+        raise ValueError(
+            "E1 reduced token-length requires at least one context segment and one query segment."
+        )
+
+    query = parts[-1]
+    context = parts[:-1]
+    longest_len = max(len(p) for p in parts)
+
+    if longest_len > reduced_max_token_length:
+        raise ValueError(
+            "Reduced E1 token budget is smaller than the longest segment length; "
+            "cannot satisfy budget even after dropping all context."
+        )
+
+    def est_token_len(num_context: int) -> int:
+        return (num_context + 1) * longest_len
+
+    full_est = est_token_len(len(context))
+    if reduced_max_token_length >= full_est:
+        return ",".join(context + [query]), True
+
+    while len(context) > 1 and est_token_len(len(context)) > reduced_max_token_length:
+        drop_idx = rng.randrange(len(context))
+        context.pop(drop_idx)
+
+    if est_token_len(len(context)) > reduced_max_token_length:
+        raise ValueError(
+            "Reduced E1 token budget would require dropping all context sequences; "
+            "increase --e1-reduced-max-token-length."
+        )
+
+    return ",".join(context + [query]), False
 
 
 def normalize_e1_multiseq_string(s: str) -> str:

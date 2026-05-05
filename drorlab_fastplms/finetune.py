@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import random
 import sys
 
 # Trainer import otherwise pulls TensorFlow/Keras; image has Keras 3 without tf-keras shim.
@@ -52,6 +53,7 @@ from drorlab_fastplms.e1_context import (
     build_e1_row_strings,
     normalize_e1_multiseq_string,
     prepare_e1_inputs_for_runtime,
+    reduce_e1_multiseq_context_to_budget,
     validate_e1_embed_inputs,
 )
 
@@ -434,6 +436,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--e1-combined-col", default=None)
     ap.add_argument("--e1-context-cols", nargs="*", default=None)
     ap.add_argument(
+        "--e1-reduced-max-token-length",
+        type=int,
+        default=None,
+        help="E1 multiseq only: approximate reduced token budget; randomly drop context segments until it fits",
+    )
+    ap.add_argument(
+        "--e1-context-drop-seed",
+        type=int,
+        default=0,
+        help="Seed for random E1 context dropping when --e1-reduced-max-token-length is set",
+    )
+    ap.add_argument(
         "--mlm-probability",
         type=float,
         default=0.15,
@@ -498,8 +512,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     if use_e1_multiseq:
-
-        def text_fn(row: pd.Series) -> str:
+        def _build_e1_text(row: pd.Series) -> tuple[str, bool]:
             # Do not slice here: multiseq context can exceed --max-length characters; E1
             # enforces limits in prep_tokens (max positions / sequences), not raw str len.
             normalized = normalize_e1_multiseq_string(
@@ -510,7 +523,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                     row=row.to_dict(),
                 )
             )
-            return prepare_e1_inputs_for_runtime([normalized], truncate=False, max_len=args.max_length)[0]
+            was_noop = False
+            if args.e1_reduced_max_token_length is not None:
+                row_idx = int(getattr(row, "name", 0))
+                rng = random.Random(args.e1_context_drop_seed + row_idx)
+                normalized, was_noop = reduce_e1_multiseq_context_to_budget(
+                    normalized,
+                    reduced_max_token_length=args.e1_reduced_max_token_length,
+                    rng=rng,
+                )
+            text = prepare_e1_inputs_for_runtime([normalized], truncate=False, max_len=args.max_length)[0]
+            return text, was_noop
+
+        def text_fn(row: pd.Series) -> str:
+            return _build_e1_text(row)[0]
 
     else:
 
@@ -522,8 +548,23 @@ def main(argv: Optional[List[str]] = None) -> int:
             return raw[: args.max_length]
 
     if e1:
-        train_texts = [text_fn(train_df.iloc[i]) for i in range(len(train_df))]
-        val_texts = [text_fn(val_df.iloc[i]) for i in range(len(val_df))]
+        if use_e1_multiseq:
+            train_pairs = [_build_e1_text(train_df.iloc[i]) for i in range(len(train_df))]
+            val_pairs = [_build_e1_text(val_df.iloc[i]) for i in range(len(val_df))]
+            train_texts = [t for t, _ in train_pairs]
+            val_texts = [t for t, _ in val_pairs]
+            if args.e1_reduced_max_token_length is not None:
+                noop_count = sum(1 for _, n in train_pairs if n) + sum(1 for _, n in val_pairs if n)
+                total_rows = len(train_pairs) + len(val_pairs)
+                if noop_count > 0:
+                    print(
+                        "Warning: --e1-reduced-max-token-length is >= estimated full multiseq token length "
+                        f"for {noop_count}/{total_rows} train+val rows; context dropping was a no-op for those rows.",
+                        file=sys.stderr,
+                    )
+        else:
+            train_texts = [text_fn(train_df.iloc[i]) for i in range(len(train_df))]
+            val_texts = [text_fn(val_df.iloc[i]) for i in range(len(val_df))]
         try:
             validate_e1_embed_inputs(
                 train_texts + val_texts,

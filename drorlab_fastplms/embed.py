@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import random
 import sys
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from drorlab_fastplms.e1_context import (
     build_e1_row_strings,
     normalize_e1_multiseq_string,
     prepare_e1_inputs_for_runtime,
+    reduce_e1_multiseq_context_to_budget,
     validate_e1_embed_inputs,
 )
 from drorlab_fastplms.io_utils import load_csv_as_records, load_sequences_csv, load_sequences_fasta
@@ -73,6 +75,18 @@ def main(argv: list[str] | None = None) -> int:
         nargs="*",
         default=None,
         help="E1 only: context columns in order, before --seq-col as query (space-separated)",
+    )
+    p.add_argument(
+        "--e1-reduced-max-token-length",
+        type=int,
+        default=None,
+        help="E1 multiseq only: approximate reduced token budget; randomly drop context segments until it fits",
+    )
+    p.add_argument(
+        "--e1-context-drop-seed",
+        type=int,
+        default=0,
+        help="Seed for random E1 context dropping when --e1-reduced-max-token-length is set",
     )
     args = p.parse_args(argv)
 
@@ -124,6 +138,30 @@ def main(argv: list[str] | None = None) -> int:
 
     if e1:
         sequences = [normalize_e1_multiseq_string(s) for s in sequences]
+        if args.e1_reduced_max_token_length is not None:
+            rng = random.Random(args.e1_context_drop_seed)
+            noop_count = 0
+            try:
+                reduced_sequences: list[str] = []
+                for s in sequences:
+                    reduced, was_noop = reduce_e1_multiseq_context_to_budget(
+                        s,
+                        reduced_max_token_length=args.e1_reduced_max_token_length,
+                        rng=rng,
+                    )
+                    if was_noop:
+                        noop_count += 1
+                    reduced_sequences.append(reduced)
+                sequences = reduced_sequences
+            except ValueError as e:
+                print(str(e), file=sys.stderr)
+                return 2
+            if noop_count > 0:
+                print(
+                    "Warning: --e1-reduced-max-token-length is >= estimated full multiseq token length "
+                    f"for {noop_count}/{len(sequences)} rows; context dropping was a no-op for those rows.",
+                    file=sys.stderr,
+                )
         sequences = prepare_e1_inputs_for_runtime(sequences, truncate=True, max_len=args.max_len)
         try:
             validate_e1_embed_inputs(sequences, row_labels=ids)
