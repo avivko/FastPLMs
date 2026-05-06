@@ -89,12 +89,17 @@ def prepare_e1_inputs_for_runtime(
     return out
 
 
+def e1_multiseq_has_context(multiseq: str) -> bool:
+    """True when a normalized multiseq string has at least one context segment plus query."""
+    return len(_nonempty_multiseq_parts(multiseq)) >= 2
+
+
 def reduce_e1_multiseq_context_to_budget(
     multiseq: str,
     *,
     reduced_max_token_length: int,
     rng: random.Random,
-) -> tuple[str, bool]:
+) -> tuple[str, bool, bool]:
     """
     Randomly drop context segments (keep query as last) until reduced token budget fits.
 
@@ -106,9 +111,8 @@ def reduce_e1_multiseq_context_to_budget(
 
     parts = _nonempty_multiseq_parts(multiseq)
     if len(parts) < 2:
-        raise ValueError(
-            "E1 reduced token-length requires at least one context segment and one query segment."
-        )
+        # Query-only row: nothing to reduce; pass through unchanged.
+        return ",".join(parts), True, True
 
     query = parts[-1]
     context = parts[:-1]
@@ -125,7 +129,7 @@ def reduce_e1_multiseq_context_to_budget(
 
     full_est = est_token_len(len(context))
     if reduced_max_token_length >= full_est:
-        return ",".join(context + [query]), True
+        return ",".join(context + [query]), True, False
 
     while len(context) > 1 and est_token_len(len(context)) > reduced_max_token_length:
         drop_idx = rng.randrange(len(context))
@@ -137,7 +141,7 @@ def reduce_e1_multiseq_context_to_budget(
             "increase --e1-reduced-max-token-length."
         )
 
-    return ",".join(context + [query]), False
+    return ",".join(context + [query]), False, False
 
 
 def normalize_e1_multiseq_string(s: str) -> str:

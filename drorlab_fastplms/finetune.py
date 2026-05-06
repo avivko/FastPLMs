@@ -51,6 +51,7 @@ from drorlab_fastplms.cli_common import (
 )
 from drorlab_fastplms.e1_context import (
     build_e1_row_strings,
+    e1_multiseq_has_context,
     normalize_e1_multiseq_string,
     prepare_e1_inputs_for_runtime,
     reduce_e1_multiseq_context_to_budget,
@@ -512,7 +513,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     if use_e1_multiseq:
-        def _build_e1_text(row: pd.Series) -> tuple[str, bool]:
+        def _build_e1_text(row: pd.Series) -> tuple[str, bool, bool]:
             # Do not slice here: multiseq context can exceed --max-length characters; E1
             # enforces limits in prep_tokens (max positions / sequences), not raw str len.
             normalized = normalize_e1_multiseq_string(
@@ -524,16 +525,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                 )
             )
             was_noop = False
+            was_no_context = False
             if args.e1_reduced_max_token_length is not None:
                 row_idx = int(getattr(row, "name", 0))
                 rng = random.Random(args.e1_context_drop_seed + row_idx)
-                normalized, was_noop = reduce_e1_multiseq_context_to_budget(
+                normalized, was_noop, was_no_context = reduce_e1_multiseq_context_to_budget(
                     normalized,
                     reduced_max_token_length=args.e1_reduced_max_token_length,
                     rng=rng,
                 )
             text = prepare_e1_inputs_for_runtime([normalized], truncate=False, max_len=args.max_length)[0]
-            return text, was_noop
+            return text, was_noop, was_no_context
 
         def text_fn(row: pd.Series) -> str:
             return _build_e1_text(row)[0]
@@ -551,15 +553,33 @@ def main(argv: Optional[List[str]] = None) -> int:
         if use_e1_multiseq:
             train_pairs = [_build_e1_text(train_df.iloc[i]) for i in range(len(train_df))]
             val_pairs = [_build_e1_text(val_df.iloc[i]) for i in range(len(val_df))]
-            train_texts = [t for t, _ in train_pairs]
-            val_texts = [t for t, _ in val_pairs]
+            train_texts = [t for t, _, _ in train_pairs]
+            val_texts = [t for t, _, _ in val_pairs]
+            total_rows = len(train_pairs) + len(val_pairs)
+            no_context_count = sum(1 for t in train_texts if not e1_multiseq_has_context(t)) + sum(
+                1 for t in val_texts if not e1_multiseq_has_context(t)
+            )
+            print(
+                f"E1 context mode: {no_context_count}/{total_rows} train+val rows have no context (query-only).",
+                file=sys.stderr,
+            )
             if args.e1_reduced_max_token_length is not None:
-                noop_count = sum(1 for _, n in train_pairs if n) + sum(1 for _, n in val_pairs if n)
-                total_rows = len(train_pairs) + len(val_pairs)
+                noop_count = sum(1 for _, n, nc in train_pairs if n and not nc) + sum(
+                    1 for _, n, nc in val_pairs if n and not nc
+                )
+                reduced_skip_no_context = sum(1 for _, _, nc in train_pairs if nc) + sum(
+                    1 for _, _, nc in val_pairs if nc
+                )
                 if noop_count > 0:
                     print(
                         "Warning: --e1-reduced-max-token-length is >= estimated full multiseq token length "
                         f"for {noop_count}/{total_rows} train+val rows; context dropping was a no-op for those rows.",
+                        file=sys.stderr,
+                    )
+                if reduced_skip_no_context > 0:
+                    print(
+                        "Note: --e1-reduced-max-token-length skipped reduction for "
+                        f"{reduced_skip_no_context}/{total_rows} query-only train+val rows (no context present).",
                         file=sys.stderr,
                     )
         else:

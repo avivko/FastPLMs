@@ -31,6 +31,7 @@ from drorlab_fastplms.cli_common import (
 )
 from drorlab_fastplms.e1_context import (
     build_e1_row_strings,
+    e1_multiseq_has_context,
     normalize_e1_multiseq_string,
     prepare_e1_inputs_for_runtime,
     reduce_e1_multiseq_context_to_budget,
@@ -136,30 +137,47 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Unsupported input extension {ext!r}; use .csv or .fasta", file=sys.stderr)
         return 2
 
+    use_e1_context_mode = bool(args.e1_combined_col or (args.e1_context_cols and len(args.e1_context_cols) > 0))
+
     if e1:
         sequences = [normalize_e1_multiseq_string(s) for s in sequences]
+        if use_e1_context_mode:
+            no_context_count = sum(1 for s in sequences if not e1_multiseq_has_context(s))
+            print(
+                f"E1 context mode: {no_context_count}/{len(sequences)} rows have no context (query-only).",
+                file=sys.stderr,
+            )
         if args.e1_reduced_max_token_length is not None:
             rng = random.Random(args.e1_context_drop_seed)
-            noop_count = 0
+            noop_budget_count = 0
+            no_context_count_after_reduce = 0
             try:
                 reduced_sequences: list[str] = []
                 for s in sequences:
-                    reduced, was_noop = reduce_e1_multiseq_context_to_budget(
+                    reduced, was_noop, was_no_context = reduce_e1_multiseq_context_to_budget(
                         s,
                         reduced_max_token_length=args.e1_reduced_max_token_length,
                         rng=rng,
                     )
-                    if was_noop:
-                        noop_count += 1
+                    if was_noop and not was_no_context:
+                        noop_budget_count += 1
+                    if was_no_context:
+                        no_context_count_after_reduce += 1
                     reduced_sequences.append(reduced)
                 sequences = reduced_sequences
             except ValueError as e:
                 print(str(e), file=sys.stderr)
                 return 2
-            if noop_count > 0:
+            if noop_budget_count > 0:
                 print(
                     "Warning: --e1-reduced-max-token-length is >= estimated full multiseq token length "
-                    f"for {noop_count}/{len(sequences)} rows; context dropping was a no-op for those rows.",
+                    f"for {noop_budget_count}/{len(sequences)} rows; context dropping was a no-op for those rows.",
+                    file=sys.stderr,
+                )
+            if no_context_count_after_reduce > 0:
+                print(
+                    "Note: --e1-reduced-max-token-length skipped reduction for "
+                    f"{no_context_count_after_reduce}/{len(sequences)} query-only rows (no context present).",
                     file=sys.stderr,
                 )
         sequences = prepare_e1_inputs_for_runtime(sequences, truncate=True, max_len=args.max_len)
