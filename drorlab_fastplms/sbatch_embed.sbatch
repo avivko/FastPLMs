@@ -19,9 +19,10 @@
 #
 # Optional env: SIF, REPO_ROOT, HF_TOKEN, HUGGING_FACE_HUB_TOKEN
 #
-# SQLite outputs (*.db): by default stage on $SCRATCH for fast local I/O, then sync back
-# to the final OUTPUT path after the job. Stage path is stable per OUTPUT so a new job can
-# resume from the latest staged DB after interrupted runs. Disable with FASTPLMS_NO_EMBED_DB_STAGE=1.
+# Stageable outputs (*.db, *.zarr): by default stage on $SCRATCH for fast local I/O, then sync back
+# to final OUTPUT after the job. Stage path is stable per OUTPUT so a new job can resume from the
+# latest staged artifact after interrupted runs. Disable with FASTPLMS_NO_EMBED_STAGE=1
+# (legacy alias: FASTPLMS_NO_EMBED_DB_STAGE=1).
 
 set -euo pipefail
 
@@ -41,7 +42,8 @@ REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-.}}"
 
 mkdir -p "${SCRATCH}/fastplms_workspace"
 
-_EMBED_STAGE_DB_HOST=""
+_EMBED_STAGE_HOST=""
+_EMBED_STAGE_KIND=""
 RUN_OUTPUT="$OUTPUT"
 
 _sqlite_maybe_checkpoint() {
@@ -51,28 +53,58 @@ _sqlite_maybe_checkpoint() {
   fi
 }
 
-if [[ "${FASTPLMS_NO_EMBED_DB_STAGE:-0}" != "1" ]] && [[ "${OUTPUT,,}" == *.db ]]; then
+_sync_tree() {
+  local src="$1"
+  local dst="$2"
+  mkdir -p "$dst"
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --delete "${src%/}/" "${dst%/}/"
+  else
+    rm -rf "${dst%/}"/* "${dst%/}"/.[!.]* "${dst%/}"/..?* 2>/dev/null || true
+    cp -a "${src%/}/." "${dst%/}/"
+  fi
+}
+
+_NO_STAGE="${FASTPLMS_NO_EMBED_STAGE:-${FASTPLMS_NO_EMBED_DB_STAGE:-0}}"
+if [[ "$_NO_STAGE" != "1" ]] && [[ "${OUTPUT,,}" == *.db || "${OUTPUT,,}" == *.zarr ]]; then
   _OUT_KEY="$(printf '%s' "$OUTPUT" | sha1sum | awk '{print $1}')"
   _OUT_BASE="$(basename "$OUTPUT")"
   _STAGE_REL="embed_stage/by_output/${_OUT_KEY}"
   mkdir -p "${SCRATCH}/fastplms_workspace/${_STAGE_REL}"
-  _EMBED_STAGE_DB_HOST="${SCRATCH}/fastplms_workspace/${_STAGE_REL}/${_OUT_BASE}"
+  _EMBED_STAGE_HOST="${SCRATCH}/fastplms_workspace/${_STAGE_REL}/${_OUT_BASE}"
   RUN_OUTPUT="/workspace/${_STAGE_REL}/${_OUT_BASE}"
-  echo "sbatch_embed: staging SQLite OUTPUT on SCRATCH (${_EMBED_STAGE_DB_HOST}) — final destination: ${OUTPUT}" >&2
-  if [[ -f "${_EMBED_STAGE_DB_HOST}" ]]; then
-    if [[ -f "$OUTPUT" ]] && [[ "$OUTPUT" -nt "${_EMBED_STAGE_DB_HOST}" ]]; then
-      echo "sbatch_embed: output DB is newer than staged DB; refreshing stage from OUTPUT." >&2
-      cp -f "$OUTPUT" "${_EMBED_STAGE_DB_HOST}"
-      [[ -f "${OUTPUT}-wal" ]] && cp -f "${OUTPUT}-wal" "${_EMBED_STAGE_DB_HOST}-wal" || rm -f "${_EMBED_STAGE_DB_HOST}-wal" 2>/dev/null || true
-      [[ -f "${OUTPUT}-shm" ]] && cp -f "${OUTPUT}-shm" "${_EMBED_STAGE_DB_HOST}-shm" || rm -f "${_EMBED_STAGE_DB_HOST}-shm" 2>/dev/null || true
-    else
-      echo "sbatch_embed: using existing staged DB for resume." >&2
+  if [[ "${OUTPUT,,}" == *.db ]]; then
+    _EMBED_STAGE_KIND="db"
+    echo "sbatch_embed: staging SQLite OUTPUT on SCRATCH (${_EMBED_STAGE_HOST}) — final destination: ${OUTPUT}" >&2
+    if [[ -f "${_EMBED_STAGE_HOST}" ]]; then
+      if [[ -f "$OUTPUT" ]] && [[ "$OUTPUT" -nt "${_EMBED_STAGE_HOST}" ]]; then
+        echo "sbatch_embed: output DB is newer than staged DB; refreshing stage from OUTPUT." >&2
+        cp -f "$OUTPUT" "${_EMBED_STAGE_HOST}"
+        [[ -f "${OUTPUT}-wal" ]] && cp -f "${OUTPUT}-wal" "${_EMBED_STAGE_HOST}-wal" || rm -f "${_EMBED_STAGE_HOST}-wal" 2>/dev/null || true
+        [[ -f "${OUTPUT}-shm" ]] && cp -f "${OUTPUT}-shm" "${_EMBED_STAGE_HOST}-shm" || rm -f "${_EMBED_STAGE_HOST}-shm" 2>/dev/null || true
+      else
+        echo "sbatch_embed: using existing staged DB for resume." >&2
+      fi
+    elif [[ -f "$OUTPUT" ]]; then
+      echo "sbatch_embed: seeding stage from existing OUTPUT DB." >&2
+      cp -f "$OUTPUT" "${_EMBED_STAGE_HOST}"
+      [[ -f "${OUTPUT}-wal" ]] && cp -f "${OUTPUT}-wal" "${_EMBED_STAGE_HOST}-wal" || true
+      [[ -f "${OUTPUT}-shm" ]] && cp -f "${OUTPUT}-shm" "${_EMBED_STAGE_HOST}-shm" || true
     fi
-  elif [[ -f "$OUTPUT" ]]; then
-    echo "sbatch_embed: seeding stage from existing OUTPUT DB." >&2
-    cp -f "$OUTPUT" "${_EMBED_STAGE_DB_HOST}"
-    [[ -f "${OUTPUT}-wal" ]] && cp -f "${OUTPUT}-wal" "${_EMBED_STAGE_DB_HOST}-wal" || true
-    [[ -f "${OUTPUT}-shm" ]] && cp -f "${OUTPUT}-shm" "${_EMBED_STAGE_DB_HOST}-shm" || true
+  else
+    _EMBED_STAGE_KIND="zarr"
+    echo "sbatch_embed: staging Zarr OUTPUT on SCRATCH (${_EMBED_STAGE_HOST}) — final destination: ${OUTPUT}" >&2
+    if [[ -d "${_EMBED_STAGE_HOST}" ]]; then
+      if [[ -d "$OUTPUT" ]] && [[ "$OUTPUT" -nt "${_EMBED_STAGE_HOST}" ]]; then
+        echo "sbatch_embed: output Zarr is newer than staged Zarr; refreshing stage from OUTPUT." >&2
+        _sync_tree "$OUTPUT" "${_EMBED_STAGE_HOST}"
+      else
+        echo "sbatch_embed: using existing staged Zarr for resume." >&2
+      fi
+    elif [[ -d "$OUTPUT" ]]; then
+      echo "sbatch_embed: seeding stage from existing OUTPUT Zarr." >&2
+      _sync_tree "$OUTPUT" "${_EMBED_STAGE_HOST}"
+    fi
   fi
 fi
 
@@ -94,14 +126,20 @@ singularity exec --nv \
 _PY_EXIT=$?
 set -e
 
-if [[ -n "${_EMBED_STAGE_DB_HOST}" ]] && [[ -f "${_EMBED_STAGE_DB_HOST}" ]]; then
-  _sqlite_maybe_checkpoint "${_EMBED_STAGE_DB_HOST}"
+if [[ "${_EMBED_STAGE_KIND}" == "db" ]] && [[ -f "${_EMBED_STAGE_HOST}" ]]; then
+  _sqlite_maybe_checkpoint "${_EMBED_STAGE_HOST}"
   mkdir -p "$(dirname "$OUTPUT")"
   rm -f "${OUTPUT}-wal" "${OUTPUT}-shm" 2>/dev/null || true
-  cp -f "${_EMBED_STAGE_DB_HOST}" "$OUTPUT"
-  [[ -f "${_EMBED_STAGE_DB_HOST}-wal" ]] && cp -f "${_EMBED_STAGE_DB_HOST}-wal" "${OUTPUT}-wal"
-  [[ -f "${_EMBED_STAGE_DB_HOST}-shm" ]] && cp -f "${_EMBED_STAGE_DB_HOST}-shm" "${OUTPUT}-shm"
+  cp -f "${_EMBED_STAGE_HOST}" "$OUTPUT"
+  [[ -f "${_EMBED_STAGE_HOST}-wal" ]] && cp -f "${_EMBED_STAGE_HOST}-wal" "${OUTPUT}-wal"
+  [[ -f "${_EMBED_STAGE_HOST}-shm" ]] && cp -f "${_EMBED_STAGE_HOST}-shm" "${OUTPUT}-shm"
   echo "sbatch_embed: copied staged DB back to ${OUTPUT}" >&2
+fi
+
+if [[ "${_EMBED_STAGE_KIND}" == "zarr" ]] && [[ -d "${_EMBED_STAGE_HOST}" ]]; then
+  mkdir -p "$OUTPUT"
+  _sync_tree "${_EMBED_STAGE_HOST}" "$OUTPUT"
+  echo "sbatch_embed: copied staged Zarr back to ${OUTPUT}" >&2
 fi
 
 exit "${_PY_EXIT}"

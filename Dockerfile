@@ -20,8 +20,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && \
+    # rsync is used by drorlab zarr staging/export copy-back paths
     apt-get install -y --no-install-recommends \
-        build-essential curl git ca-certificates \
+        build-essential curl git ca-certificates rsync \
         python3.12 python3.12-dev python3.12-venv \
         ninja-build && \
     python3.12 -m venv /opt/venv && \
@@ -46,6 +47,9 @@ RUN pip install -e /app/official/e1
 RUN pip install -r requirements.txt
 RUN pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
 RUN pip install numpy==1.26.4
+
+## for using drorlab zarr exporting (pin major version for API stability)
+RUN pip install "zarr<4"
 
 COPY . .
 

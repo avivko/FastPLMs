@@ -41,6 +41,12 @@ from drorlab_fastplms.e1_context import (
 )
 from drorlab_fastplms.embed_batch_timing import patch_embed_timing
 from drorlab_fastplms.io_utils import load_csv_as_records, load_sequences_csv, load_sequences_fasta
+from drorlab_fastplms.zarr_export import (
+    choose_resume_db_path,
+    convert_db_to_zarr,
+    default_db_path_for_zarr,
+    export_embeddings_to_zarr,
+)
 
 
 def parse_pooling(s: str) -> list[str]:
@@ -57,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         help="CSV: column for query sequence (required for most CSV inputs; omit for FASTA)",
     )
     p.add_argument("--id-col", default=None, help="Optional CSV column for row ids (writes manifest next to output)")
-    p.add_argument("--output", required=True, help="Output .pth or .db (SQLite)")
+    p.add_argument("--output", required=True, help="Output .pth, .db (SQLite), or .zarr")
     p.add_argument("--pooling", default="mean", help="Comma-separated pooling strategies (default: mean)")
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--max-len", type=int, default=2048)
@@ -106,6 +112,17 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=50,
         help="With --timing, log a line every N batches (0 = only final summary).",
+    )
+    p.add_argument(
+        "--zarr-resume-from-db",
+        nargs="?",
+        const="__AUTO__",
+        default=None,
+        help=(
+            "When output is .zarr, pre-seed/resume by converting from a SQLite .db first. "
+            "Optional value: explicit DB path. If provided without value, default is <output_stem>.db. "
+            "If a newer staged DB exists on scratch, it is preferred automatically."
+        ),
     )
     args = p.parse_args(argv)
     stage_t0 = time.perf_counter()
@@ -223,6 +240,7 @@ def main(argv: list[str] | None = None) -> int:
     out_path = args.output
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     use_sql = out_path.lower().endswith(".db")
+    use_zarr = out_path.lower().endswith(".zarr")
 
     dtype = resolve_torch_dtype(args.dtype)
     device = default_device()
@@ -252,12 +270,19 @@ def main(argv: list[str] | None = None) -> int:
         full_embeddings=args.full_embeddings,
         embed_dtype=torch.float32,
         pooling_types=pooling,
-        save=not use_sql,
-        save_path=out_path if not use_sql else "embeddings.pth",
+        save=not use_sql and not use_zarr,
+        save_path=out_path if (not use_sql and not use_zarr) else "embeddings.pth",
         sql=use_sql,
         sql_db_path=out_path if use_sql else "embeddings.db",
         padding="longest",
     )
+
+    sequence_to_id: dict[str, str] | None = None
+    if ids is not None and len(ids) == len(sequences):
+        sequence_to_id = {}
+        for seq, sid in zip(sequences, ids):
+            if seq not in sequence_to_id:
+                sequence_to_id[seq] = sid
 
     restore_timing: Callable[[], None] | None = None
     if args.timing:
@@ -270,20 +295,60 @@ def main(argv: list[str] | None = None) -> int:
     embed_t0 = time.perf_counter()
     try:
         with torch.inference_mode():
-            model.embed_dataset(**kwargs)
+            if use_zarr:
+                if args.zarr_resume_from_db is not None:
+                    db_hint = (
+                        default_db_path_for_zarr(out_path)
+                        if args.zarr_resume_from_db == "__AUTO__"
+                        else args.zarr_resume_from_db
+                    )
+                    db_source = choose_resume_db_path(db_hint, prefer_staged=True)
+                    if db_source is None:
+                        print(
+                            f"[zarr-resume] No resume DB found at {db_hint} (or staged equivalent). Skipping DB pre-seed."
+                        )
+                    else:
+                        print(f"[zarr-resume] Pre-seeding from DB: {db_source}")
+                        convert_db_to_zarr(
+                            db_path=db_source,
+                            zarr_path=out_path,
+                            manifest_path=os.path.splitext(out_path.rstrip("/"))[0] + "_manifest.csv",
+                            batch_size=2048,
+                            timing=args.timing,
+                        )
+                manifest = os.path.splitext(out_path.rstrip("/"))[0] + "_manifest.csv"
+                export_embeddings_to_zarr(
+                    model=model,
+                    sequences=sequences,
+                    sequence_to_id=sequence_to_id,
+                    tokenizer=tokenizer,
+                    save_path=out_path,
+                    manifest_path=manifest,
+                    batch_size=args.batch_size,
+                    max_len=args.max_len,
+                    truncate=False if e1 else True,
+                    full_embeddings=args.full_embeddings,
+                    embed_dtype=torch.float32,
+                    pooling_types=pooling,
+                    timing=args.timing,
+                )
+            else:
+                model.embed_dataset(**kwargs)
     finally:
         if restore_timing is not None:
             restore_timing()
     if args.timing:
         print(f"[timing] embed_total_s={time.perf_counter() - embed_t0:.3f}")
 
-    if args.id_col and ids is not None and len(ids) == len(sequences) and not use_sql:
+    if args.id_col and ids is not None and len(ids) == len(sequences) and not use_sql and not use_zarr:
         manifest = os.path.splitext(out_path)[0] + "_manifest.csv"
         pd.DataFrame({"id": ids, "sequence": sequences}).to_csv(manifest, index=False)
         print(f"Wrote manifest {manifest}")
 
     if use_sql:
         print(f"Wrote SQLite embeddings to {out_path}")
+    elif use_zarr:
+        print(f"Wrote Zarr embeddings to {out_path}")
     else:
         print(f"Wrote embeddings to {out_path} ({len(sequences)} sequences; keys are sequence strings)")
     return 0

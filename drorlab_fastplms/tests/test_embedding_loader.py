@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
+import csv
 from pathlib import Path
 
 import pytest
@@ -165,3 +166,96 @@ def test_load_embeddings_pth_roundtrip(tmp_path: Path):
     assert loaded[seq].shape == d[seq].shape
     out = load_per_residue_embs(str(p), sequence=seq, family="esm_tokenizer", residue_number_1b=None)
     assert out.shape == (len(seq), 8)
+
+
+def _zarr_or_skip():
+    return pytest.importorskip("zarr")
+
+
+def _write_manifest(path: Path, rows: list[dict]) -> None:
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+@pytest.mark.embedding_loader
+def test_embedding_zarr_reader_full_embeddings(tmp_path: Path):
+    zarr = _zarr_or_skip()
+    from drorlab_fastplms.embedding_loader import EmbeddingZarrReader
+
+    store = tmp_path / "full.zarr"
+    manifest = tmp_path / "full_manifest.csv"
+
+    root = zarr.open_group(str(store), mode="w")
+    root.attrs["layout"] = "full_embeddings"
+    root.create_array("residues", data=torch.arange(6 * 4, dtype=torch.float32).reshape(6, 4).numpy(), chunks=(6, 4))
+    root.create_array("row_start", data=[0, 3], chunks=(2,), dtype="i8")
+    root.create_array("row_length", data=[3, 3], chunks=(2,), dtype="i4")
+    _write_manifest(
+        manifest,
+        [
+            {"row_index": 0, "sequence": "AAA", "id": "id0", "residue_start": 0, "residue_length": 3},
+            {"row_index": 1, "sequence": "BBB", "id": "id1", "residue_start": 3, "residue_length": 3},
+        ],
+    )
+
+    with EmbeddingZarrReader(str(store)) as zr:
+        assert zr.count() == 2
+        assert zr.list_sequences(limit=2) == ["AAA", "BBB"]
+        emb = zr.get_full_embedding("BBB")
+        assert emb.shape == (3, 4)
+        assert torch.equal(emb, torch.arange(12, 24, dtype=torch.float32).reshape(3, 4))
+
+
+@pytest.mark.embedding_loader
+def test_load_per_residue_from_zarr_full(tmp_path: Path):
+    zarr = _zarr_or_skip()
+    from drorlab_fastplms.embedding_loader import load_per_residue_embs
+
+    # E1 single-sequence full layout: L+4 rows.
+    seq = "ACDE"
+    full = torch.arange((len(seq) + 4) * 5, dtype=torch.float32).reshape(len(seq) + 4, 5)
+
+    store = tmp_path / "e1full.zarr"
+    manifest = tmp_path / "e1full_manifest.csv"
+    root = zarr.open_group(str(store), mode="w")
+    root.attrs["layout"] = "full_embeddings"
+    root.create_array("residues", data=full.numpy(), chunks=(len(full), 5))
+    root.create_array("row_start", data=[0], chunks=(1,), dtype="i8")
+    root.create_array("row_length", data=[len(full)], chunks=(1,), dtype="i4")
+    _write_manifest(
+        manifest,
+        [{"row_index": 0, "sequence": seq, "id": "id0", "residue_start": 0, "residue_length": len(full)}],
+    )
+
+    out = load_per_residue_embs(str(store), sequence=seq, family="e1")
+    assert out.shape == (len(seq), 5)
+    assert torch.equal(out, full[2:-2])
+
+
+@pytest.mark.embedding_loader
+def test_load_embeddings_dispatch_zarr_pooled(tmp_path: Path):
+    zarr = _zarr_or_skip()
+    from drorlab_fastplms.embedding_loader import load_embeddings
+
+    store = tmp_path / "pooled.zarr"
+    manifest = tmp_path / "pooled_manifest.csv"
+    pooled = torch.tensor([[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]], dtype=torch.float32)
+
+    root = zarr.open_group(str(store), mode="w")
+    root.attrs["layout"] = "pooled_embeddings"
+    root.create_array("pooled", data=pooled.numpy(), chunks=(2, 3))
+    _write_manifest(
+        manifest,
+        [
+            {"row_index": 0, "sequence": "S1", "id": "a"},
+            {"row_index": 1, "sequence": "S2", "id": "b"},
+        ],
+    )
+
+    loaded = load_embeddings(str(store))
+    assert set(loaded.keys()) == {"S1", "S2"}
+    assert loaded["S1"].shape == (3,)
+    assert torch.equal(loaded["S2"], pooled[1])

@@ -20,6 +20,7 @@ SQLite rows use the compact blob format decoded by ``drorlab_fastplms.embedding_
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import sqlite3
 import sys
@@ -133,11 +134,137 @@ def load_embeddings_db(path: str, sequences: Optional[List[str]] = None) -> Dict
     return out
 
 
+def _load_zarr_module():
+    try:
+        import zarr  # type: ignore
+    except Exception as e:  # pragma: no cover - dependency/runtime guard
+        raise RuntimeError(
+            "Tried to read a .zarr embedding store, but `zarr` is not installed."
+        ) from e
+    return zarr
+
+
+class EmbeddingZarrReader:
+    """Read embeddings from drorlab `.zarr` export with manifest mapping."""
+
+    def __init__(self, path: str) -> None:
+        if not os.path.isdir(path):
+            raise FileNotFoundError(path)
+        self.path = path
+        zarr = _load_zarr_module()
+        self._root = zarr.open_group(path, mode="r")
+        self.layout = str(self._root.attrs.get("layout", ""))
+        if self.layout not in {"full_embeddings", "pooled_embeddings"}:
+            raise ValueError(
+                f"Unsupported Zarr layout {self.layout!r} in {path}. "
+                "Expected 'full_embeddings' or 'pooled_embeddings'."
+            )
+
+        manifest_path = os.path.splitext(path.rstrip("/"))[0] + "_manifest.csv"
+        if not os.path.isfile(manifest_path):
+            raise FileNotFoundError(
+                f"Expected manifest for Zarr store at {manifest_path}"
+            )
+        self.manifest_path = manifest_path
+        self._seq_to_row: Dict[str, int] = {}
+        self._row_to_seq: List[str] = []
+        with open(manifest_path, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                seq = str(row["sequence"])
+                row_idx = int(row["row_index"])
+                if row_idx != len(self._row_to_seq):
+                    raise ValueError(
+                        f"Manifest row_index mismatch at {manifest_path}: "
+                        f"got {row_idx}, expected {len(self._row_to_seq)}"
+                    )
+                self._row_to_seq.append(seq)
+                if seq not in self._seq_to_row:
+                    self._seq_to_row[seq] = row_idx
+
+        if self.layout == "full_embeddings":
+            self._residues = self._root["residues"]
+            self._row_start = self._root["row_start"]
+            self._row_length = self._root["row_length"]
+            if int(self._row_start.shape[0]) != len(self._row_to_seq):
+                raise ValueError(
+                    "Zarr full embedding index length mismatch: "
+                    f"row_start={int(self._row_start.shape[0])} manifest={len(self._row_to_seq)}"
+                )
+        else:
+            self._pooled = self._root["pooled"]
+            if int(self._pooled.shape[0]) != len(self._row_to_seq):
+                raise ValueError(
+                    "Zarr pooled length mismatch: "
+                    f"pooled={int(self._pooled.shape[0])} manifest={len(self._row_to_seq)}"
+                )
+
+    def close(self) -> None:
+        # zarr arrays are lazily accessed; no explicit close needed.
+        return
+
+    def __enter__(self) -> "EmbeddingZarrReader":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def count(self) -> int:
+        return len(self._row_to_seq)
+
+    def list_sequences(self, limit: int = 10) -> List[str]:
+        return self._row_to_seq[: max(0, limit)]
+
+    def _get_row_index(self, sequence: str) -> int:
+        if sequence not in self._seq_to_row:
+            raise KeyError(f"Sequence not found in {self.path}")
+        return self._seq_to_row[sequence]
+
+    def get_full_embedding(self, sequence: str) -> torch.Tensor:
+        row_idx = self._get_row_index(sequence)
+        if self.layout == "full_embeddings":
+            start = int(self._row_start[row_idx])
+            n = int(self._row_length[row_idx])
+            arr = self._residues[start : start + n]
+            return torch.from_numpy(arr.astype("float32", copy=False))
+        arr = self._pooled[row_idx]
+        return torch.from_numpy(arr.astype("float32", copy=False))
+
+    def iter_full_embeddings(
+        self,
+        sequences: List[str],
+        batch_size: int = DEFAULT_DB_BATCH_SIZE,
+    ) -> Iterator[Tuple[str, torch.Tensor]]:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be > 0")
+        for seq in sequences:
+            yield seq, self.get_full_embedding(seq)
+
+    def iter_all_full_embeddings(
+        self,
+        batch_size: int = DEFAULT_DB_BATCH_SIZE,
+    ) -> Iterator[Tuple[str, torch.Tensor]]:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be > 0")
+        for seq in self._row_to_seq:
+            yield seq, self.get_full_embedding(seq)
+
+
+def load_embeddings_zarr(path: str, sequences: Optional[List[str]] = None) -> Dict[str, torch.Tensor]:
+    """Load drorlab `.zarr` embeddings via manifest mapping."""
+    with EmbeddingZarrReader(path) as z:
+        if sequences is None:
+            return {seq: emb for seq, emb in z.iter_all_full_embeddings()}
+        return {seq: z.get_full_embedding(seq) for seq in sequences}
+
+
 def load_embeddings(path: str, sequences: Optional[List[str]] = None) -> Dict[str, torch.Tensor]:
-    """Dispatch on file extension: ``.db`` -> SQLite; else treat as ``.pth``."""
+    """Dispatch on file extension: `.db` -> SQLite, `.zarr` -> Zarr, else treat as `.pth`."""
     lower = path.lower()
     if lower.endswith(".db"):
         return load_embeddings_db(path, sequences=sequences)
+    if lower.endswith(".zarr"):
+        return load_embeddings_zarr(path, sequences=sequences)
     return load_embeddings_pth(path)
 
 
@@ -363,7 +490,7 @@ def _apply_residue_number(
 
 
 def get_per_residue_embs(
-    source: Union[str, Dict[str, torch.Tensor], EmbeddingDBReader],
+    source: Union[str, Dict[str, torch.Tensor], EmbeddingDBReader, EmbeddingZarrReader],
     sequence: str,
     family: ModelFamily = "auto",
     residue_number_1b: ResidueSpec = None,
@@ -379,12 +506,15 @@ def get_per_residue_embs(
     - `residue_number_1b`: optional 1-based residue index within the **query protein** for E1 multiseq
       (same as single E1 for a one-segment key).
     """
-    if isinstance(source, EmbeddingDBReader):
+    if isinstance(source, (EmbeddingDBReader, EmbeddingZarrReader)):
         full_emb = source.get_full_embedding(sequence)
     elif isinstance(source, str):
         if source.lower().endswith(".db"):
             with EmbeddingDBReader(source) as db:
                 full_emb = db.get_full_embedding(sequence)
+        elif source.lower().endswith(".zarr"):
+            with EmbeddingZarrReader(source) as z:
+                full_emb = z.get_full_embedding(sequence)
         else:
             full_emb = load_embeddings_pth(source)[sequence]
     else:
@@ -395,14 +525,14 @@ def get_per_residue_embs(
 
 
 def iter_per_residue_embs(
-    source: Union[str, Dict[str, torch.Tensor], EmbeddingDBReader],
+    source: Union[str, Dict[str, torch.Tensor], EmbeddingDBReader, EmbeddingZarrReader],
     sequences: List[str],
     family: ModelFamily = "auto",
     residue_number_1b: ResidueSpec = None,
     db_batch_size: int = DEFAULT_DB_BATCH_SIZE,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     """Yield per-residue embeddings for many sequences without loading everything into memory."""
-    if isinstance(source, EmbeddingDBReader):
+    if isinstance(source, (EmbeddingDBReader, EmbeddingZarrReader)):
         for seq, full_emb in source.iter_full_embeddings(sequences, batch_size=db_batch_size):
             yield seq, _apply_residue_number(
                 _full_embeddings_to_residue_view(full_emb, seq, family=family),
@@ -414,6 +544,14 @@ def iter_per_residue_embs(
         if source.lower().endswith(".db"):
             with EmbeddingDBReader(source) as db:
                 for seq, full_emb in db.iter_full_embeddings(sequences, batch_size=db_batch_size):
+                    yield seq, _apply_residue_number(
+                        _full_embeddings_to_residue_view(full_emb, seq, family=family),
+                        residue_number_1b,
+                    )
+            return
+        if source.lower().endswith(".zarr"):
+            with EmbeddingZarrReader(source) as z:
+                for seq, full_emb in z.iter_full_embeddings(sequences, batch_size=db_batch_size):
                     yield seq, _apply_residue_number(
                         _full_embeddings_to_residue_view(full_emb, seq, family=family),
                         residue_number_1b,
@@ -437,13 +575,13 @@ def iter_per_residue_embs(
 
 
 def _iter_per_residue_embs_ordered_pairs(
-    source: Union[str, Dict[str, torch.Tensor], EmbeddingDBReader],
+    source: Union[str, Dict[str, torch.Tensor], EmbeddingDBReader, EmbeddingZarrReader],
     pairs: List[Tuple[str, ResidueSpec]],
     family: ModelFamily = "auto",
     db_batch_size: int = DEFAULT_DB_BATCH_SIZE,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     """Yield (sequence, tensor) in ``pairs`` order; supports duplicate sequence strings with different specs."""
-    if isinstance(source, EmbeddingDBReader):
+    if isinstance(source, (EmbeddingDBReader, EmbeddingZarrReader)):
         seqs_unique = list(dict.fromkeys(s for s, _ in pairs))
         full_map: Dict[str, torch.Tensor] = {}
         for seq, full_emb in source.iter_full_embeddings(seqs_unique, batch_size=db_batch_size):
@@ -462,6 +600,12 @@ def _iter_per_residue_embs_ordered_pairs(
             with EmbeddingDBReader(source) as db:
                 yield from _iter_per_residue_embs_ordered_pairs(
                     db, pairs, family=family, db_batch_size=db_batch_size
+                )
+            return
+        if source.lower().endswith(".zarr"):
+            with EmbeddingZarrReader(source) as z:
+                yield from _iter_per_residue_embs_ordered_pairs(
+                    z, pairs, family=family, db_batch_size=db_batch_size
                 )
             return
 
@@ -483,7 +627,7 @@ def _iter_per_residue_embs_ordered_pairs(
 
 
 def load_per_residue_embs(
-    source: Union[str, Dict[str, torch.Tensor], EmbeddingDBReader],
+    source: Union[str, Dict[str, torch.Tensor], EmbeddingDBReader, EmbeddingZarrReader],
     sequence: Optional[str] = None,
     sequences: Optional[List[str]] = None,
     family: ModelFamily = "auto",
@@ -607,9 +751,9 @@ def load_per_residue_embs(
             db_batch_size=batch_size,
         )
 
-    if isinstance(source, EmbeddingDBReader):
+    if isinstance(source, (EmbeddingDBReader, EmbeddingZarrReader)):
 
-        def _iter_db_all(reader: EmbeddingDBReader) -> Iterator[Tuple[str, torch.Tensor]]:
+        def _iter_db_all(reader: Union[EmbeddingDBReader, EmbeddingZarrReader]) -> Iterator[Tuple[str, torch.Tensor]]:
             for seq, full_emb in reader.iter_all_full_embeddings(batch_size=batch_size):
                 yield seq, _apply_residue_number(
                     _full_embeddings_to_residue_view(full_emb, seq, family=family),
@@ -630,6 +774,18 @@ def load_per_residue_embs(
 
         return _iter_db_all_from_path(source)
 
+    if isinstance(source, str) and source.lower().endswith(".zarr"):
+
+        def _iter_zarr_all_from_path(path: str) -> Iterator[Tuple[str, torch.Tensor]]:
+            with EmbeddingZarrReader(path) as z:
+                for seq, full_emb in z.iter_all_full_embeddings(batch_size=batch_size):
+                    yield seq, _apply_residue_number(
+                        _full_embeddings_to_residue_view(full_emb, seq, family=family),
+                        residue_number_1b,
+                    )
+
+        return _iter_zarr_all_from_path(source)
+
     full = load_embeddings_pth(source) if isinstance(source, str) else source
 
     def _iter_map_all(m: Dict[str, torch.Tensor]) -> Iterator[Tuple[str, torch.Tensor]]:
@@ -643,7 +799,7 @@ def load_per_residue_embs(
 
 
 def load_all_per_residue_embs_in_memory(
-    source: Union[str, Dict[str, torch.Tensor], EmbeddingDBReader],
+    source: Union[str, Dict[str, torch.Tensor], EmbeddingDBReader, EmbeddingZarrReader],
     family: ModelFamily = "auto",
     residue_number_1b: ResidueSpec = None,
     db_batch_size: int = DEFAULT_DB_BATCH_SIZE,
@@ -652,7 +808,7 @@ def load_all_per_residue_embs_in_memory(
 
     Use with care on very large datasets.
     """
-    if isinstance(source, EmbeddingDBReader):
+    if isinstance(source, (EmbeddingDBReader, EmbeddingZarrReader)):
         seqs = source.list_sequences(limit=source.count())
         return {seq: emb for seq, emb in iter_per_residue_embs(
             source=source,
@@ -667,6 +823,16 @@ def load_all_per_residue_embs_in_memory(
             seqs = db.list_sequences(limit=db.count())
             return {seq: emb for seq, emb in iter_per_residue_embs(
                 source=db,
+                sequences=seqs,
+                family=family,
+                residue_number_1b=residue_number_1b,
+                db_batch_size=db_batch_size,
+            )}
+    if isinstance(source, str) and source.lower().endswith(".zarr"):
+        with EmbeddingZarrReader(source) as z:
+            seqs = z.list_sequences(limit=z.count())
+            return {seq: emb for seq, emb in iter_per_residue_embs(
+                source=z,
                 sequences=seqs,
                 family=family,
                 residue_number_1b=residue_number_1b,
@@ -687,8 +853,8 @@ def load_all_per_residue_embs_in_memory(
 
 
 def _main(argv: Optional[List[str]] = None) -> int:
-    p = argparse.ArgumentParser(description="Inspect / load FastPLMs embeddings (.pth or .db).")
-    p.add_argument("--path", required=True, help="Path to .pth or .db")
+    p = argparse.ArgumentParser(description="Inspect / load FastPLMs embeddings (.pth, .db, or .zarr).")
+    p.add_argument("--path", required=True, help="Path to .pth or .db or .zarr")
     p.add_argument("--sequence", default=None, help="Sequence key to decode")
     p.add_argument(
         "--family",
@@ -728,6 +894,16 @@ def _main(argv: Optional[List[str]] = None) -> int:
                 print(f"Embedding DB entries: {total} in {args.path}")
                 if args.list_limit > 0:
                     keys = db.list_sequences(limit=args.list_limit)
+                    for i, k in enumerate(keys):
+                        print(i, k[:60] + ("..." if len(k) > 60 else ""))
+                    if total > len(keys):
+                        print("...")
+        elif args.path.lower().endswith(".zarr"):
+            with EmbeddingZarrReader(args.path) as z:
+                total = z.count()
+                print(f"Embedding Zarr entries: {total} in {args.path} (layout={z.layout})")
+                if args.list_limit > 0:
+                    keys = z.list_sequences(limit=args.list_limit)
                     for i, k in enumerate(keys):
                         print(i, k[:60] + ("..." if len(k) > 60 else ""))
                     if total > len(keys):
