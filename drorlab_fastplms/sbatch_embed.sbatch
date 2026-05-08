@@ -117,7 +117,7 @@ singularity exec --nv \
   -B "${SCRATCH}/fastplms_workspace:/workspace" \
   -B "${REPO_ROOT}:/workspace/repo" \
   "$SIF" \
-  env PYTHONPATH="/app:/workspace/repo" HF_TOKEN="${HF_TOKEN:-}" HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-}" \
+  env PYTHONPATH="/app:/workspace/repo" HF_TOKEN="${HF_TOKEN:-}" HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-}" FASTPLMS_FINAL_OUTPUT="${OUTPUT}" \
   python /workspace/repo/drorlab_fastplms/embed.py \
     --model "$MODEL" \
     --input "$INPUT" \

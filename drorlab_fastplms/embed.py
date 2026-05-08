@@ -297,15 +297,24 @@ def main(argv: list[str] | None = None) -> int:
         with torch.inference_mode():
             if use_zarr:
                 if args.zarr_resume_from_db is not None:
-                    db_hint = (
-                        default_db_path_for_zarr(out_path)
-                        if args.zarr_resume_from_db == "__AUTO__"
-                        else args.zarr_resume_from_db
-                    )
-                    db_source = choose_resume_db_path(db_hint, prefer_staged=True)
+                    if args.zarr_resume_from_db == "__AUTO__":
+                        db_hints = [default_db_path_for_zarr(out_path)]
+                        final_out = os.environ.get("FASTPLMS_FINAL_OUTPUT")
+                        if final_out:
+                            db_hints.insert(0, default_db_path_for_zarr(final_out))
+                    else:
+                        db_hints = [args.zarr_resume_from_db]
+
+                    db_source = None
+                    chosen_hint = db_hints[0]
+                    for db_hint in db_hints:
+                        chosen_hint = db_hint
+                        db_source = choose_resume_db_path(db_hint, prefer_staged=True)
+                        if db_source is not None:
+                            break
                     if db_source is None:
                         print(
-                            f"[zarr-resume] No resume DB found at {db_hint} (or staged equivalent). Skipping DB pre-seed."
+                            f"[zarr-resume] No resume DB found at {chosen_hint} (or staged equivalent). Skipping DB pre-seed."
                         )
                     else:
                         print(f"[zarr-resume] Pre-seeding from DB: {db_source}")
