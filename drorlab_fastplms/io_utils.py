@@ -20,6 +20,19 @@ def load_sequences_fasta(path: str) -> Tuple[List[str], None]:
     return seqs, None
 
 
+def _read_csv_selective(path: str, usecols: Optional[List[str]] = None) -> pd.DataFrame:
+    """Read CSV with explicit column selection and string dtypes for lower parse overhead."""
+    read_kwargs = {"low_memory": False}
+    if usecols is not None:
+        read_kwargs["usecols"] = usecols
+        read_kwargs["dtype"] = {col: "string" for col in usecols}
+    try:
+        # PyArrow parser is often much faster for very large CSVs.
+        return pd.read_csv(path, engine="pyarrow", **read_kwargs)
+    except Exception:
+        return pd.read_csv(path, **read_kwargs)
+
+
 def load_sequences_csv(
     path: str,
     seq_col: str,
@@ -28,7 +41,8 @@ def load_sequences_csv(
     """Load ``seq_col`` from CSV; optional ``id_col`` for manifest output."""
     if not os.path.isfile(path):
         raise FileNotFoundError(f"CSV not found: {path}")
-    df = pd.read_csv(path)
+    usecols = [seq_col] + ([id_col] if id_col is not None else [])
+    df = _read_csv_selective(path, usecols=usecols)
     if seq_col not in df.columns:
         raise ValueError(f"Column {seq_col!r} not in CSV. Available: {list(df.columns)}")
     if id_col is not None and id_col not in df.columns:
@@ -53,9 +67,9 @@ def load_sequences_csv(
     return sequences, ids
 
 
-def load_csv_as_records(path: str) -> List[dict]:
+def load_csv_as_records(path: str, usecols: Optional[List[str]] = None) -> List[dict]:
     """Return list of row dicts (column -> scalar) for per-row E1 assembly."""
     if not os.path.isfile(path):
         raise FileNotFoundError(f"CSV not found: {path}")
-    df = pd.read_csv(path)
+    df = _read_csv_selective(path, usecols=usecols)
     return df.to_dict(orient="records")

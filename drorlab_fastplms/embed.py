@@ -7,7 +7,9 @@ import argparse
 import os
 import random
 import sys
+import time
 from pathlib import Path
+from typing import Callable
 
 # Allow `python path/to/drorlab_fastplms/embed.py` without installing the package.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +39,7 @@ from drorlab_fastplms.e1_context import (
     reduce_e1_multiseq_context_to_budget,
     validate_e1_embed_inputs,
 )
+from drorlab_fastplms.embed_batch_timing import patch_embed_timing
 from drorlab_fastplms.io_utils import load_csv_as_records, load_sequences_csv, load_sequences_fasta
 
 
@@ -56,13 +59,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--id-col", default=None, help="Optional CSV column for row ids (writes manifest next to output)")
     p.add_argument("--output", required=True, help="Output .pth or .db (SQLite)")
     p.add_argument("--pooling", default="mean", help="Comma-separated pooling strategies (default: mean)")
-    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--max-len", type=int, default=2048)
     p.add_argument("--full-embeddings", action="store_true", help="Per-residue embeddings in .pth")
     p.add_argument(
         "--attn-backend",
-        default="auto",
-        help="Attention backend: auto (fastest available: flash→flex→sdpa), sdpa (exact/reproducible), flex, kernels_flash (default: auto)",
+        default="kernels_flash",
+        help="Attention backend: auto (fastest available: flash→flex→sdpa), sdpa (exact/reproducible), flex, kernels_flash (default: kernels_flash)",
     )
     p.add_argument("--dtype", default="float16", help="Model load dtype: bfloat16, float16, float32")
     p.add_argument("--no-entrypoint-setup", action="store_true", help="Skip entrypoint_setup import")
@@ -89,7 +92,23 @@ def main(argv: list[str] | None = None) -> int:
         default=0,
         help="Seed for random E1 context dropping when --e1-reduced-max-token-length is set",
     )
+    p.add_argument(
+        "--timing",
+        action="store_true",
+        help=(
+            "Print timing for CSV load, E1 preprocessing, model load, total embed wall time, and "
+            "per-batch forward_s + since_prev_forward_s (CPU/IO between batches). "
+            "Uses a drorlab-only wrap of model._embed (works with padding=longest / no torch.compile)."
+        ),
+    )
+    p.add_argument(
+        "--timing-batch-log-every",
+        type=int,
+        default=50,
+        help="With --timing, log a line every N batches (0 = only final summary).",
+    )
     args = p.parse_args(argv)
+    stage_t0 = time.perf_counter()
 
     if not args.no_entrypoint_setup:
         try_entrypoint_setup()
@@ -113,7 +132,16 @@ def main(argv: list[str] | None = None) -> int:
             print("--seq-col is required for this CSV input", file=sys.stderr)
             return 2
         if e1 and (args.e1_combined_col or (args.e1_context_cols is not None and len(args.e1_context_cols) > 0)):
-            records = load_csv_as_records(inp)
+            selected_cols = []
+            if args.e1_combined_col:
+                selected_cols.append(args.e1_combined_col)
+            selected_cols.extend(args.e1_context_cols or [])
+            if args.seq_col:
+                selected_cols.append(args.seq_col)
+            if args.id_col:
+                selected_cols.append(args.id_col)
+            selected_cols = list(dict.fromkeys(selected_cols))
+            records = load_csv_as_records(inp, usecols=selected_cols)
             sequences = []
             row_ids: list[str] = []
             for i, row in enumerate(records):
@@ -138,8 +166,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     use_e1_context_mode = bool(args.e1_combined_col or (args.e1_context_cols and len(args.e1_context_cols) > 0))
+    if args.timing:
+        print(f"[timing] load_input_s={time.perf_counter() - stage_t0:.3f}")
 
     if e1:
+        e1_prep_t0 = time.perf_counter()
         sequences = [normalize_e1_multiseq_string(s) for s in sequences]
         if use_e1_context_mode:
             no_context_count = sum(1 for s in sequences if not e1_multiseq_has_context(s))
@@ -186,6 +217,8 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as e:
             print(str(e), file=sys.stderr)
             return 2
+        if args.timing:
+            print(f"[timing] e1_preprocess_s={time.perf_counter() - e1_prep_t0:.3f}")
 
     out_path = args.output
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -193,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
 
     dtype = resolve_torch_dtype(args.dtype)
     device = default_device()
+    load_model_t0 = time.perf_counter()
     print(f"Loading {args.model} on {device} dtype={dtype} attn_backend={args.attn_backend} ...")
     model = AutoModelForMaskedLM.from_pretrained(
         args.model,
@@ -203,6 +237,8 @@ def main(argv: list[str] | None = None) -> int:
     apply_attn_backend_after_load(model, args.attn_backend, cfg)
     model.eval()
     model.to(device)
+    if args.timing:
+        print(f"[timing] model_load_s={time.perf_counter() - load_model_t0:.3f}")
 
     tokenizer = None if e1 else model.tokenizer
     pooling = parse_pooling(args.pooling)
@@ -223,8 +259,23 @@ def main(argv: list[str] | None = None) -> int:
         padding="longest",
     )
 
-    with torch.inference_mode():
-        model.embed_dataset(**kwargs)
+    restore_timing: Callable[[], None] | None = None
+    if args.timing:
+        restore_timing = patch_embed_timing(
+            model,
+            cuda_sync=True,
+            log_every=max(0, args.timing_batch_log_every),
+        )
+
+    embed_t0 = time.perf_counter()
+    try:
+        with torch.inference_mode():
+            model.embed_dataset(**kwargs)
+    finally:
+        if restore_timing is not None:
+            restore_timing()
+    if args.timing:
+        print(f"[timing] embed_total_s={time.perf_counter() - embed_t0:.3f}")
 
     if args.id_col and ids is not None and len(ids) == len(sequences) and not use_sql:
         manifest = os.path.splitext(out_path)[0] + "_manifest.csv"

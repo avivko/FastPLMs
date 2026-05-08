@@ -3,9 +3,9 @@
 #SBATCH --partition=owners,rondror
 #SBATCH --gres=gpu:1
 #SBATCH --constraint=GPU_GEN:AMP|GPU_GEN:HPR
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=32
 #SBATCH --mem=120G
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=/oak/stanford/groups/rondror/software/plms/slurm_outs/fp_ft_%j.out
 #SBATCH --error=/oak/stanford/groups/rondror/software/plms/slurm_outs/fp_ft_%j.err
 #
