@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import sys
 from typing import List, Sequence
 
 # Must match ``E1PreTrainedModel.validate_sequence`` / ``prepare_singleseq`` in ``fastplms/e1/modeling_e1.py``.
@@ -72,20 +73,79 @@ def prepare_e1_inputs_for_runtime(
     """
     Prepare E1 strings for runtime exactly as embed/finetune intend.
 
-    When truncating raw multiseq strings by character count, a cut can land on a comma
-    and create an empty segment at runtime. To prevent ``prepare_multiseq`` failures,
-    we drop empty comma-separated segments after truncation.
+    Truncation is applied per-segment (single-sequence or each comma-separated segment),
+    never to the full multi-sequence string. Segment boundaries are always preserved.
+    If a query segment exceeds ``max_len``, it is truncated and a warning is emitted.
     """
     out: List[str] = []
+    query_trunc_count = 0
+    context_trunc_count = 0
+    query_trunc_residues = 0
+    context_trunc_residues = 0
+    query_pre_lens: List[int] = []
+    context_pre_lens: List[int] = []
+
     for s in sequences:
-        t = s[:max_len] if truncate else s
-        parts = _nonempty_multiseq_parts(t)
+        parts = _nonempty_multiseq_parts(s)
         if not parts:
             raise ValueError(
-                "After --max-len truncation, an E1 multi-sequence string has no non-empty segments. "
-                "Use a larger --max-len or disable truncation."
+                "E1 multi-sequence string has no non-empty segments after comma split."
             )
-        out.append(",".join(parts))
+
+        if not truncate:
+            out.append(",".join(parts))
+            continue
+
+        if len(parts) == 1:
+            q = parts[0]
+            if len(q) > max_len:
+                query_trunc_count += 1
+                query_trunc_residues += (len(q) - max_len)
+                query_pre_lens.append(len(q))
+                q = q[:max_len]
+            out.append(q)
+            continue
+
+        query = parts[-1]
+        if len(query) > max_len:
+            query_trunc_count += 1
+            query_trunc_residues += (len(query) - max_len)
+            query_pre_lens.append(len(query))
+            query = query[:max_len]
+
+        context = []
+        for ctx in parts[:-1]:
+            if len(ctx) > max_len:
+                context_trunc_count += 1
+                context_trunc_residues += (len(ctx) - max_len)
+                context_pre_lens.append(len(ctx))
+                context.append(ctx[:max_len])
+            else:
+                context.append(ctx)
+
+        out.append(",".join(context + [query]))
+
+    if query_trunc_count > 0:
+        q_min = min(query_pre_lens)
+        q_max = max(query_pre_lens)
+        print(
+            "Warning: truncated "
+            f"{query_trunc_count} E1 query segment(s) to --max-len={max_len}; "
+            f"removed {query_trunc_residues} residues total; "
+            f"pre-truncation query lengths range [{q_min}, {q_max}].",
+            file=sys.stderr,
+        )
+    if context_trunc_count > 0:
+        c_min = min(context_pre_lens)
+        c_max = max(context_pre_lens)
+        print(
+            "Note: truncated "
+            f"{context_trunc_count} E1 context segment(s) to --max-len={max_len}; "
+            f"removed {context_trunc_residues} residues total; "
+            f"pre-truncation context lengths range [{c_min}, {c_max}].",
+            file=sys.stderr,
+        )
+
     return out
 
 
