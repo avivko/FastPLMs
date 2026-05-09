@@ -5,7 +5,7 @@
 #SBATCH --constraint=GPU_GEN:AMP|GPU_GEN:HPR
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=240G
-#SBATCH --time=48:00:00
+#SBATCH --time=120:00:00
 #SBATCH --output=/oak/stanford/groups/rondror/software/plms/slurm_outs/fp_embed_%j.out
 #SBATCH --error=/oak/stanford/groups/rondror/software/plms/slurm_outs/fp_embed_%j.err
 #
@@ -18,6 +18,12 @@
 #     --seq-col sequence --batch-size 16
 #
 # Optional env: SIF, REPO_ROOT, HF_TOKEN, HUGGING_FACE_HUB_TOKEN
+#
+# Zarr scratch→Oak sync (rsync): defaults tuned for many small chunk files.
+#   FASTPLMS_RSYNC_PARALLEL=N   Rsync immediate children of the store with up to N parallel jobs
+#                               (default 8). Set to 1 for a single full-tree rsync (also enables
+#                               FASTPLMS_RSYNC_PROGRESS below).
+#   FASTPLMS_RSYNC_PROGRESS=1   Pass --info=progress2 (only when PARALLEL is 1).
 #
 # Stageable outputs (*.db, *.zarr): by default stage on $SCRATCH for fast local I/O, then sync back
 # to final OUTPUT after the job. Stage path is stable per OUTPUT so a new job can resume from the
@@ -58,7 +64,30 @@ _sync_tree() {
   local dst="$2"
   mkdir -p "$dst"
   if command -v rsync >/dev/null 2>&1; then
-    rsync -a --delete "${src%/}/" "${dst%/}/"
+    # --whole-file: skip rolling checksums (often much faster scratch→NFS than default delta mode).
+    local jobs="${FASTPLMS_RSYNC_PARALLEL:-8}"
+    if ! [[ "$jobs" =~ ^[0-9]+$ ]]; then
+      jobs=8
+    fi
+    if [[ "$jobs" -gt 1 ]]; then
+      # One rsync per top-level member (array dirs + root metadata files).
+      find "${src%/}" -mindepth 1 -maxdepth 1 -print0 2>/dev/null \
+        | xargs -0 -r -P "$jobs" -n1 bash -c '
+          dstroot="$1"
+          item="$2"
+          bn=$(basename "$item")
+          if [[ -d "$item" ]]; then
+            mkdir -p "${dstroot%/}/$bn"
+            rsync -a --whole-file --delete "${item%/}/" "${dstroot%/}/$bn/"
+          else
+            rsync -a --whole-file "$item" "${dstroot%/}/$bn"
+          fi
+        ' bash "$dst"
+    else
+      local rsync_opts=( -a --whole-file --delete )
+      [[ "${FASTPLMS_RSYNC_PROGRESS:-0}" == "1" ]] && rsync_opts+=( --info=progress2 )
+      rsync "${rsync_opts[@]}" "${src%/}/" "${dst%/}/"
+    fi
   else
     rm -rf "${dst%/}"/* "${dst%/}"/.[!.]* "${dst%/}"/..?* 2>/dev/null || true
     cp -a "${src%/}/." "${dst%/}/"
