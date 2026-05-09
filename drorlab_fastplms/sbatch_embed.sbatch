@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --constraint=GPU_GEN:AMP|GPU_GEN:HPR
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=120G
+#SBATCH --mem=240G
 #SBATCH --time=48:00:00
 #SBATCH --output=/oak/stanford/groups/rondror/software/plms/slurm_outs/fp_embed_%j.out
 #SBATCH --error=/oak/stanford/groups/rondror/software/plms/slurm_outs/fp_embed_%j.err

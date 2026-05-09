@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--id-col", default=None, help="Optional CSV column for row ids (writes manifest next to output)")
     p.add_argument("--output", required=True, help="Output .pth, .db (SQLite), or .zarr")
     p.add_argument("--pooling", default="mean", help="Comma-separated pooling strategies (default: mean)")
-    p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--max-len", type=int, default=2048)
     p.add_argument("--full-embeddings", action="store_true", help="Per-residue embeddings in .pth")
     p.add_argument(
