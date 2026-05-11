@@ -19,14 +19,14 @@
 #
 # Optional env: SIF, REPO_ROOT, HF_TOKEN, HUGGING_FACE_HUB_TOKEN
 #
-# Zarr scratch→Oak sync (rsync): defaults tuned for many small chunk files.
-#   FASTPLMS_RSYNC_PARALLEL=N   Rsync immediate children of the store with up to N parallel jobs
-#                               (default 8). Set to 1 for a single full-tree rsync (also enables
-#                               FASTPLMS_RSYNC_PROGRESS below).
-#   FASTPLMS_RSYNC_PROGRESS=1   Pass --info=progress2 (only when PARALLEL is 1).
+# Zarr scratch→Oak sync prefers `dcp` from `mpifileutils`; falls back to rsync/cp if unavailable.
+#   FASTPLMS_RSYNC_PARALLEL=N   Fallback rsync mode: sync immediate children of the store with up to
+#                               N parallel jobs (default 8). Set to 1 for a single full-tree rsync
+#                               (also enables FASTPLMS_RSYNC_PROGRESS below).
+#   FASTPLMS_RSYNC_PROGRESS=1   Fallback rsync mode: pass --info=progress2 (only when PARALLEL is 1).
 #
 # Slurm writes stdout -> .out and stderr -> .err. tqdm/warnings go to stderr (.err); embed prints -> .out.
-# Batch script milestones print to BOTH streams so either file shows staging + copy/rsync. PYTHONUNBUFFERED=1
+# Batch script milestones print to BOTH streams so either file shows staging + copy/sync. PYTHONUNBUFFERED=1
 # keeps Python/tqdm line-buffered into Slurm logs instead of one blob at exit.
 #
 # Stageable outputs (*.db, *.zarr): by default stage on $SCRATCH for fast local I/O, then sync back
@@ -56,10 +56,24 @@ _EMBED_STAGE_HOST=""
 _EMBED_STAGE_KIND=""
 RUN_OUTPUT="$OUTPUT"
 
-# Print to stdout and stderr so Slurm .out and .err both show wrapper milestones (copy/rsync, staging).
+# Print to stdout and stderr so Slurm .out and .err both show wrapper milestones (copy/sync, staging).
 _sbatch_embed_msg() {
   printf '%s\n' "$*"
   printf '%s\n' "$*" >&2
+}
+
+_maybe_load_dcp() {
+  if command -v dcp >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if command -v ml >/dev/null 2>&1; then
+    ml system mpifileutils >/dev/null 2>&1 || true
+  elif command -v module >/dev/null 2>&1; then
+    module load system mpifileutils >/dev/null 2>&1 || true
+  fi
+
+  command -v dcp >/dev/null 2>&1
 }
 
 _sqlite_maybe_checkpoint() {
@@ -72,8 +86,18 @@ _sqlite_maybe_checkpoint() {
 _sync_tree() {
   local src="$1"
   local dst="$2"
-  mkdir -p "$dst"
-  if command -v rsync >/dev/null 2>&1; then
+  local src_trim="${src%/}"
+  local dst_trim="${dst%/}"
+  local dst_parent
+
+  dst_parent="$(dirname "$dst_trim")"
+  mkdir -p "$dst_parent"
+
+  if _maybe_load_dcp; then
+    rm -rf "$dst_trim"
+    dcp "$src_trim" "$dst_parent/"
+  elif command -v rsync >/dev/null 2>&1; then
+    mkdir -p "$dst_trim"
     # --whole-file: skip rolling checksums (often much faster scratch→NFS than default delta mode).
     local jobs="${FASTPLMS_RSYNC_PARALLEL:-8}"
     if ! [[ "$jobs" =~ ^[0-9]+$ ]]; then
@@ -92,15 +116,16 @@ _sync_tree() {
           else
             rsync -a --whole-file "$item" "${dstroot%/}/$bn"
           fi
-        ' bash "$dst"
+        ' bash "$dst_trim"
     else
       local rsync_opts=( -a --whole-file --delete )
       [[ "${FASTPLMS_RSYNC_PROGRESS:-0}" == "1" ]] && rsync_opts+=( --info=progress2 )
-      rsync "${rsync_opts[@]}" "${src%/}/" "${dst%/}/"
+      rsync "${rsync_opts[@]}" "${src_trim}/" "${dst_trim}/"
     fi
   else
-    rm -rf "${dst%/}"/* "${dst%/}"/.[!.]* "${dst%/}"/..?* 2>/dev/null || true
-    cp -a "${src%/}/." "${dst%/}/"
+    rm -rf "$dst_trim"
+    mkdir -p "$dst_trim"
+    cp -a "${src_trim}/." "${dst_trim}/"
   fi
 }
 
@@ -182,7 +207,7 @@ if [[ "${_EMBED_STAGE_KIND}" == "zarr" ]] && [[ -d "${_EMBED_STAGE_HOST}" ]]; th
   _sbatch_embed_msg "sbatch_embed: syncing staged Zarr -> ${OUTPUT} (no per-file progress here; large stores may take many minutes)"
   _t0=$(date +%s)
   _sync_tree "${_EMBED_STAGE_HOST}" "$OUTPUT"
-  _sbatch_embed_msg "sbatch_embed: Zarr rsync finished in $(($(date +%s) - _t0))s -> ${OUTPUT}"
+  _sbatch_embed_msg "sbatch_embed: Zarr sync finished in $(($(date +%s) - _t0))s -> ${OUTPUT}"
 fi
 
 exit "${_PY_EXIT}"
