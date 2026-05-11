@@ -19,7 +19,9 @@
 #
 # Optional env: SIF, REPO_ROOT, HF_TOKEN, HUGGING_FACE_HUB_TOKEN
 #
-# Zarr scratch→Oak sync prefers `dcp` from `mpifileutils`; falls back to rsync/cp if unavailable.
+# Zarr scratch→Oak sync prefers `dsync`/`dcp` from `mpifileutils`; falls back to rsync/cp if unavailable.
+#   FASTPLMS_MPI_SYNC_NP=N      mpifileutils ranks for dsync/dcp (default SLURM_CPUS_PER_TASK or 1).
+#   FASTPLMS_DSYNC_PROGRESS=N   dsync only: print progress about every N seconds (default off).
 #   FASTPLMS_RSYNC_PARALLEL=N   Fallback rsync mode: sync immediate children of the store with up to
 #                               N parallel jobs (default 8). Set to 1 for a single full-tree rsync
 #                               (also enables FASTPLMS_RSYNC_PROGRESS below).
@@ -62,8 +64,8 @@ _sbatch_embed_msg() {
   printf '%s\n' "$*" >&2
 }
 
-_maybe_load_dcp() {
-  if command -v dcp >/dev/null 2>&1; then
+_maybe_load_mpifileutils() {
+  if command -v dsync >/dev/null 2>&1 || command -v dcp >/dev/null 2>&1; then
     return 0
   fi
 
@@ -73,7 +75,25 @@ _maybe_load_dcp() {
     module load system mpifileutils >/dev/null 2>&1 || true
   fi
 
-  command -v dcp >/dev/null 2>&1
+  command -v dsync >/dev/null 2>&1 || command -v dcp >/dev/null 2>&1
+}
+
+_run_mpifileutils() {
+  local tool="$1"
+  shift
+
+  local np="${FASTPLMS_MPI_SYNC_NP:-${SLURM_CPUS_PER_TASK:-1}}"
+  if ! [[ "$np" =~ ^[0-9]+$ ]] || [[ "$np" -lt 1 ]]; then
+    np=1
+  fi
+
+  if [[ "$np" -gt 1 ]] && command -v mpirun >/dev/null 2>&1; then
+    mpirun -np "$np" "$tool" "$@"
+  elif [[ "$np" -gt 1 ]] && command -v srun >/dev/null 2>&1 && [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    srun --ntasks="$np" --cpus-per-task=1 "$tool" "$@"
+  else
+    "$tool" "$@"
+  fi
 }
 
 _sqlite_maybe_checkpoint() {
@@ -93,9 +113,24 @@ _sync_tree() {
   dst_parent="$(dirname "$dst_trim")"
   mkdir -p "$dst_parent"
 
-  if _maybe_load_dcp; then
-    rm -rf "$dst_trim"
-    dcp "$src_trim" "$dst_parent/"
+  if _maybe_load_mpifileutils; then
+    if command -v dsync >/dev/null 2>&1; then
+      local dsync_opts=( -D )
+      if [[ -n "${FASTPLMS_DSYNC_PROGRESS:-}" ]]; then
+        dsync_opts+=( --progress "${FASTPLMS_DSYNC_PROGRESS}" )
+      fi
+      mkdir -p "$dst_trim"
+      _sbatch_embed_msg "sbatch_embed: syncing tree with dsync (${src_trim} -> ${dst_trim})"
+      _run_mpifileutils dsync "${dsync_opts[@]}" "$src_trim" "$dst_trim"
+      return
+    fi
+
+    if command -v dcp >/dev/null 2>&1; then
+      rm -rf "$dst_trim"
+      _sbatch_embed_msg "sbatch_embed: copying tree with dcp (${src_trim} -> ${dst_trim})"
+      _run_mpifileutils dcp "$src_trim" "$dst_parent/"
+      return
+    fi
   elif command -v rsync >/dev/null 2>&1; then
     mkdir -p "$dst_trim"
     # --whole-file: skip rolling checksums (often much faster scratch→NFS than default delta mode).
