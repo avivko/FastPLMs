@@ -87,10 +87,10 @@ _run_mpifileutils() {
     np=1
   fi
 
-  if [[ "$np" -gt 1 ]] && command -v mpirun >/dev/null 2>&1; then
-    mpirun -np "$np" "$tool" "$@"
-  elif [[ "$np" -gt 1 ]] && command -v srun >/dev/null 2>&1 && [[ -n "${SLURM_JOB_ID:-}" ]]; then
+  if [[ "$np" -gt 1 ]] && command -v srun >/dev/null 2>&1 && [[ -n "${SLURM_JOB_ID:-}" ]]; then
     srun --ntasks="$np" --cpus-per-task=1 "$tool" "$@"
+  elif [[ "$np" -gt 1 ]] && command -v mpirun >/dev/null 2>&1; then
+    mpirun -np "$np" "$tool" "$@"
   else
     "$tool" "$@"
   fi
