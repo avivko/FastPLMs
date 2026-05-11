@@ -33,7 +33,10 @@
 #
 # Stageable outputs (*.db, *.zarr): by default stage on $SCRATCH for fast local I/O, then sync back
 # to final OUTPUT after the job. Stage path is stable per OUTPUT so a new job can resume from the
-# latest staged artifact after interrupted runs. Disable with FASTPLMS_NO_EMBED_STAGE=1
+# latest staged artifact after interrupted runs. Existing staged data is trusted over OUTPUT by
+# default so interrupted publishes do not poison resume state. Set FASTPLMS_REFRESH_STAGE_FROM_OUTPUT=1
+# to explicitly replace an existing stage from OUTPUT before running. Disable staging entirely with
+# FASTPLMS_NO_EMBED_STAGE=1
 # (legacy alias: FASTPLMS_NO_EMBED_DB_STAGE=1).
 
 set -euo pipefail
@@ -103,6 +106,32 @@ _sqlite_maybe_checkpoint() {
   fi
 }
 
+_zarr_manifest_path() {
+  local zarr_path="${1%/}"
+  local zarr_dir
+  local zarr_base
+  zarr_dir="$(dirname "$zarr_path")"
+  zarr_base="$(basename "$zarr_path")"
+  printf '%s/%s_manifest.csv\n' "$zarr_dir" "${zarr_base%.zarr}"
+}
+
+_sync_zarr_sidecars() {
+  local src_zarr="$1"
+  local dst_zarr="$2"
+  local src_manifest
+  local dst_manifest
+
+  src_manifest="$(_zarr_manifest_path "$src_zarr")"
+  dst_manifest="$(_zarr_manifest_path "$dst_zarr")"
+
+  if [[ -f "$src_manifest" ]]; then
+    mkdir -p "$(dirname "$dst_manifest")"
+    cp -f "$src_manifest" "$dst_manifest"
+  else
+    rm -f "$dst_manifest" 2>/dev/null || true
+  fi
+}
+
 _sync_tree() {
   local src="$1"
   local dst="$2"
@@ -165,6 +194,7 @@ _sync_tree() {
 }
 
 _NO_STAGE="${FASTPLMS_NO_EMBED_STAGE:-${FASTPLMS_NO_EMBED_DB_STAGE:-0}}"
+_REFRESH_STAGE_FROM_OUTPUT="${FASTPLMS_REFRESH_STAGE_FROM_OUTPUT:-0}"
 if [[ "$_NO_STAGE" != "1" ]] && [[ "${OUTPUT,,}" == *.db || "${OUTPUT,,}" == *.zarr ]]; then
   _OUT_KEY="$(printf '%s' "$OUTPUT" | sha1sum | awk '{print $1}')"
   _OUT_BASE="$(basename "$OUTPUT")"
@@ -176,13 +206,13 @@ if [[ "$_NO_STAGE" != "1" ]] && [[ "${OUTPUT,,}" == *.db || "${OUTPUT,,}" == *.z
     _EMBED_STAGE_KIND="db"
     _sbatch_embed_msg "sbatch_embed: staging SQLite OUTPUT on SCRATCH (${_EMBED_STAGE_HOST}) — final destination: ${OUTPUT}"
     if [[ -f "${_EMBED_STAGE_HOST}" ]]; then
-      if [[ -f "$OUTPUT" ]] && [[ "$OUTPUT" -nt "${_EMBED_STAGE_HOST}" ]]; then
-        _sbatch_embed_msg "sbatch_embed: output DB is newer than staged DB; refreshing stage from OUTPUT."
+      if [[ "$_REFRESH_STAGE_FROM_OUTPUT" == "1" ]] && [[ -f "$OUTPUT" ]]; then
+        _sbatch_embed_msg "sbatch_embed: FASTPLMS_REFRESH_STAGE_FROM_OUTPUT=1, refreshing staged DB from OUTPUT."
         cp -f "$OUTPUT" "${_EMBED_STAGE_HOST}"
         [[ -f "${OUTPUT}-wal" ]] && cp -f "${OUTPUT}-wal" "${_EMBED_STAGE_HOST}-wal" || rm -f "${_EMBED_STAGE_HOST}-wal" 2>/dev/null || true
         [[ -f "${OUTPUT}-shm" ]] && cp -f "${OUTPUT}-shm" "${_EMBED_STAGE_HOST}-shm" || rm -f "${_EMBED_STAGE_HOST}-shm" 2>/dev/null || true
       else
-        _sbatch_embed_msg "sbatch_embed: using existing staged DB for resume."
+        _sbatch_embed_msg "sbatch_embed: using existing staged DB for resume; ignoring OUTPUT copy because scratch stage already exists (set FASTPLMS_REFRESH_STAGE_FROM_OUTPUT=1 to override)."
       fi
     elif [[ -f "$OUTPUT" ]]; then
       _sbatch_embed_msg "sbatch_embed: seeding stage from existing OUTPUT DB."
@@ -194,15 +224,17 @@ if [[ "$_NO_STAGE" != "1" ]] && [[ "${OUTPUT,,}" == *.db || "${OUTPUT,,}" == *.z
     _EMBED_STAGE_KIND="zarr"
     _sbatch_embed_msg "sbatch_embed: staging Zarr OUTPUT on SCRATCH (${_EMBED_STAGE_HOST}) — final destination: ${OUTPUT}"
     if [[ -d "${_EMBED_STAGE_HOST}" ]]; then
-      if [[ -d "$OUTPUT" ]] && [[ "$OUTPUT" -nt "${_EMBED_STAGE_HOST}" ]]; then
-        _sbatch_embed_msg "sbatch_embed: output Zarr is newer than staged Zarr; refreshing stage from OUTPUT."
+      if [[ "$_REFRESH_STAGE_FROM_OUTPUT" == "1" ]] && [[ -d "$OUTPUT" ]]; then
+        _sbatch_embed_msg "sbatch_embed: FASTPLMS_REFRESH_STAGE_FROM_OUTPUT=1, refreshing staged Zarr from OUTPUT."
         _sync_tree "$OUTPUT" "${_EMBED_STAGE_HOST}"
+        _sync_zarr_sidecars "$OUTPUT" "${_EMBED_STAGE_HOST}"
       else
-        _sbatch_embed_msg "sbatch_embed: using existing staged Zarr for resume."
+        _sbatch_embed_msg "sbatch_embed: using existing staged Zarr for resume; ignoring OUTPUT copy because scratch stage already exists (set FASTPLMS_REFRESH_STAGE_FROM_OUTPUT=1 to override)."
       fi
     elif [[ -d "$OUTPUT" ]]; then
       _sbatch_embed_msg "sbatch_embed: seeding stage from existing OUTPUT Zarr."
       _sync_tree "$OUTPUT" "${_EMBED_STAGE_HOST}"
+      _sync_zarr_sidecars "$OUTPUT" "${_EMBED_STAGE_HOST}"
     fi
   fi
 fi
@@ -242,6 +274,7 @@ if [[ "${_EMBED_STAGE_KIND}" == "zarr" ]] && [[ -d "${_EMBED_STAGE_HOST}" ]]; th
   _sbatch_embed_msg "sbatch_embed: syncing staged Zarr -> ${OUTPUT} (no per-file progress here; large stores may take many minutes)"
   _t0=$(date +%s)
   _sync_tree "${_EMBED_STAGE_HOST}" "$OUTPUT"
+  _sync_zarr_sidecars "${_EMBED_STAGE_HOST}" "$OUTPUT"
   _sbatch_embed_msg "sbatch_embed: Zarr sync finished in $(($(date +%s) - _t0))s -> ${OUTPUT}"
 fi
 
