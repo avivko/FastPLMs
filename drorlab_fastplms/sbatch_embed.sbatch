@@ -25,6 +25,10 @@
 #                               FASTPLMS_RSYNC_PROGRESS below).
 #   FASTPLMS_RSYNC_PROGRESS=1   Pass --info=progress2 (only when PARALLEL is 1).
 #
+# Slurm writes stdout -> .out and stderr -> .err. tqdm/warnings go to stderr (.err); embed prints -> .out.
+# Batch script milestones print to BOTH streams so either file shows staging + copy/rsync. PYTHONUNBUFFERED=1
+# keeps Python/tqdm line-buffered into Slurm logs instead of one blob at exit.
+#
 # Stageable outputs (*.db, *.zarr): by default stage on $SCRATCH for fast local I/O, then sync back
 # to final OUTPUT after the job. Stage path is stable per OUTPUT so a new job can resume from the
 # latest staged artifact after interrupted runs. Disable with FASTPLMS_NO_EMBED_STAGE=1
@@ -51,6 +55,12 @@ mkdir -p "${SCRATCH}/fastplms_workspace"
 _EMBED_STAGE_HOST=""
 _EMBED_STAGE_KIND=""
 RUN_OUTPUT="$OUTPUT"
+
+# Print to stdout and stderr so Slurm .out and .err both show wrapper milestones (copy/rsync, staging).
+_sbatch_embed_msg() {
+  printf '%s\n' "$*"
+  printf '%s\n' "$*" >&2
+}
 
 _sqlite_maybe_checkpoint() {
   local db="$1"
@@ -104,34 +114,34 @@ if [[ "$_NO_STAGE" != "1" ]] && [[ "${OUTPUT,,}" == *.db || "${OUTPUT,,}" == *.z
   RUN_OUTPUT="/workspace/${_STAGE_REL}/${_OUT_BASE}"
   if [[ "${OUTPUT,,}" == *.db ]]; then
     _EMBED_STAGE_KIND="db"
-    echo "sbatch_embed: staging SQLite OUTPUT on SCRATCH (${_EMBED_STAGE_HOST}) — final destination: ${OUTPUT}" >&2
+    _sbatch_embed_msg "sbatch_embed: staging SQLite OUTPUT on SCRATCH (${_EMBED_STAGE_HOST}) — final destination: ${OUTPUT}"
     if [[ -f "${_EMBED_STAGE_HOST}" ]]; then
       if [[ -f "$OUTPUT" ]] && [[ "$OUTPUT" -nt "${_EMBED_STAGE_HOST}" ]]; then
-        echo "sbatch_embed: output DB is newer than staged DB; refreshing stage from OUTPUT." >&2
+        _sbatch_embed_msg "sbatch_embed: output DB is newer than staged DB; refreshing stage from OUTPUT."
         cp -f "$OUTPUT" "${_EMBED_STAGE_HOST}"
         [[ -f "${OUTPUT}-wal" ]] && cp -f "${OUTPUT}-wal" "${_EMBED_STAGE_HOST}-wal" || rm -f "${_EMBED_STAGE_HOST}-wal" 2>/dev/null || true
         [[ -f "${OUTPUT}-shm" ]] && cp -f "${OUTPUT}-shm" "${_EMBED_STAGE_HOST}-shm" || rm -f "${_EMBED_STAGE_HOST}-shm" 2>/dev/null || true
       else
-        echo "sbatch_embed: using existing staged DB for resume." >&2
+        _sbatch_embed_msg "sbatch_embed: using existing staged DB for resume."
       fi
     elif [[ -f "$OUTPUT" ]]; then
-      echo "sbatch_embed: seeding stage from existing OUTPUT DB." >&2
+      _sbatch_embed_msg "sbatch_embed: seeding stage from existing OUTPUT DB."
       cp -f "$OUTPUT" "${_EMBED_STAGE_HOST}"
       [[ -f "${OUTPUT}-wal" ]] && cp -f "${OUTPUT}-wal" "${_EMBED_STAGE_HOST}-wal" || true
       [[ -f "${OUTPUT}-shm" ]] && cp -f "${OUTPUT}-shm" "${_EMBED_STAGE_HOST}-shm" || true
     fi
   else
     _EMBED_STAGE_KIND="zarr"
-    echo "sbatch_embed: staging Zarr OUTPUT on SCRATCH (${_EMBED_STAGE_HOST}) — final destination: ${OUTPUT}" >&2
+    _sbatch_embed_msg "sbatch_embed: staging Zarr OUTPUT on SCRATCH (${_EMBED_STAGE_HOST}) — final destination: ${OUTPUT}"
     if [[ -d "${_EMBED_STAGE_HOST}" ]]; then
       if [[ -d "$OUTPUT" ]] && [[ "$OUTPUT" -nt "${_EMBED_STAGE_HOST}" ]]; then
-        echo "sbatch_embed: output Zarr is newer than staged Zarr; refreshing stage from OUTPUT." >&2
+        _sbatch_embed_msg "sbatch_embed: output Zarr is newer than staged Zarr; refreshing stage from OUTPUT."
         _sync_tree "$OUTPUT" "${_EMBED_STAGE_HOST}"
       else
-        echo "sbatch_embed: using existing staged Zarr for resume." >&2
+        _sbatch_embed_msg "sbatch_embed: using existing staged Zarr for resume."
       fi
     elif [[ -d "$OUTPUT" ]]; then
-      echo "sbatch_embed: seeding stage from existing OUTPUT Zarr." >&2
+      _sbatch_embed_msg "sbatch_embed: seeding stage from existing OUTPUT Zarr."
       _sync_tree "$OUTPUT" "${_EMBED_STAGE_HOST}"
     fi
   fi
@@ -146,7 +156,7 @@ singularity exec --nv \
   -B "${SCRATCH}/fastplms_workspace:/workspace" \
   -B "${REPO_ROOT}:/workspace/repo" \
   "$SIF" \
-  env PYTHONPATH="/app:/workspace/repo" HF_TOKEN="${HF_TOKEN:-}" HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-}" FASTPLMS_FINAL_OUTPUT="${OUTPUT}" \
+  env PYTHONUNBUFFERED=1 PYTHONPATH="/app:/workspace/repo" HF_TOKEN="${HF_TOKEN:-}" HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-}" FASTPLMS_FINAL_OUTPUT="${OUTPUT}" \
   python /workspace/repo/drorlab_fastplms/embed.py \
     --model "$MODEL" \
     --input "$INPUT" \
@@ -156,19 +166,23 @@ _PY_EXIT=$?
 set -e
 
 if [[ "${_EMBED_STAGE_KIND}" == "db" ]] && [[ -f "${_EMBED_STAGE_HOST}" ]]; then
+  _sbatch_embed_msg "sbatch_embed: copying staged SQLite -> ${OUTPUT}"
   _sqlite_maybe_checkpoint "${_EMBED_STAGE_HOST}"
   mkdir -p "$(dirname "$OUTPUT")"
   rm -f "${OUTPUT}-wal" "${OUTPUT}-shm" 2>/dev/null || true
+  _t0=$(date +%s)
   cp -f "${_EMBED_STAGE_HOST}" "$OUTPUT"
   [[ -f "${_EMBED_STAGE_HOST}-wal" ]] && cp -f "${_EMBED_STAGE_HOST}-wal" "${OUTPUT}-wal"
   [[ -f "${_EMBED_STAGE_HOST}-shm" ]] && cp -f "${_EMBED_STAGE_HOST}-shm" "${OUTPUT}-shm"
-  echo "sbatch_embed: copied staged DB back to ${OUTPUT}" >&2
+  _sbatch_embed_msg "sbatch_embed: SQLite copy finished in $(($(date +%s) - _t0))s -> ${OUTPUT}"
 fi
 
 if [[ "${_EMBED_STAGE_KIND}" == "zarr" ]] && [[ -d "${_EMBED_STAGE_HOST}" ]]; then
   mkdir -p "$OUTPUT"
+  _sbatch_embed_msg "sbatch_embed: syncing staged Zarr -> ${OUTPUT} (no per-file progress here; large stores may take many minutes)"
+  _t0=$(date +%s)
   _sync_tree "${_EMBED_STAGE_HOST}" "$OUTPUT"
-  echo "sbatch_embed: copied staged Zarr back to ${OUTPUT}" >&2
+  _sbatch_embed_msg "sbatch_embed: Zarr rsync finished in $(($(date +%s) - _t0))s -> ${OUTPUT}"
 fi
 
 exit "${_PY_EXIT}"
