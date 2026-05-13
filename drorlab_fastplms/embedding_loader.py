@@ -148,11 +148,22 @@ class EmbeddingZarrReader:
     """Read embeddings from drorlab `.zarr` export with manifest mapping."""
 
     def __init__(self, path: str) -> None:
+        path = os.path.expanduser(os.fspath(path)).strip()
+        if not path:
+            raise ValueError("EmbeddingZarrReader: path is empty")
         if not os.path.isdir(path):
             raise FileNotFoundError(path)
         self.path = path
         zarr = _load_zarr_module()
-        self._root = zarr.open_group(path, mode="r")
+        try:
+            self._root = zarr.open_group(path, mode="r")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot open Zarr group at {path!r}: {exc}. "
+                "Expected a drorlab FastPLMs export directory (non-empty Zarr v2 root with "
+                "attrs ``layout``). If this folder is empty, incomplete, or not a ``.zarr`` store, "
+                "fix the path or use ``embeddings.db`` instead."
+            ) from exc
         self.layout = str(self._root.attrs.get("layout", ""))
         if self.layout not in {"full_embeddings", "pooled_embeddings"}:
             raise ValueError(
