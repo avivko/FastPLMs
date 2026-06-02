@@ -381,8 +381,17 @@ def _full_embeddings_to_residue_view(
     full_emb: torch.Tensor,
     sequence: str,
     family: ModelFamily = "auto",
+    hidden_state_index: int = -1,
 ) -> torch.Tensor:
-    """Return a residue-aligned tensor view (row i -> residue sequence[i], 0-based)."""
+    """Return a residue-aligned tensor view (row i -> residue sequence[i], 0-based).
+
+    For embeddings saved with ``store_all_hidden_states=True``, shape is
+    ``(num_layers, T, H)``; pass ``hidden_state_index`` to select a layer first.
+    """
+    if full_emb.ndim == 3:
+        if hidden_state_index == -1:
+            hidden_state_index = full_emb.shape[0] - 1
+        full_emb = full_emb[hidden_state_index]
     if full_emb.ndim != 2:
         raise ValueError(f"Expected 2D tensor (T, H), got {tuple(full_emb.shape)}")
 

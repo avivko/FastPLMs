@@ -58,7 +58,9 @@ We maintain a comprehensive [HuggingFace Collection](https://huggingface.co/coll
 | :--- | :--- | :--- | :--- | :--- |
 | **E1** | Profluent Bio | [Profluent-Bio/E1](https://github.com/Profluent-Bio/E1) | Flex Attention, Block-Causal | 150M, 300M, 600M |
 | **ESM2** | Meta AI | [facebookresearch/esm](https://github.com/facebookresearch/esm) | Flash (SDPA) / Flex Attention | 8M, 35M, 150M, 650M, 3B |
-| **ESM++** | EvolutionaryScale | [EvolutionaryScale/esm](https://github.com/evolutionaryscale/esm) | Optimized SDPA / Flex | Small (300M), Large (600M) |
+| **ESM++** | Biohub | [Biohub/esm](https://github.com/Biohub/esm) | Optimized SDPA / Flex | Small (300M), Large (600M), 6B |
+| **ESM3** | Biohub | [Biohub/esm](https://github.com/Biohub/esm) | HF AutoModel wrapper | Open Small |
+| **ESMFold2** | Biohub | [Biohub/esm](https://github.com/Biohub/esm) | Self-contained HF AutoModel wrapper | Full, Fast |
 | **DPLM** | ByteDance | [bytedance/dplm](https://github.com/bytedance/dplm) | Diffusion Optimized Attention | 150M, 650M, 3B |
 | **DPLM2** | ByteDance | [bytedance/dplm](https://github.com/bytedance/dplm) | Multimodal Diffusion | 150M, 650M, 3B |
 | **ANKH** | Elnaggar Lab | [ElnaggarLab/ankh](https://huggingface.co/ElnaggarLab/ankh-base) | T5 RPE via Flex score_mod | Base, Large, ANKH2-L, ANKH3-L, ANKH3-XL |
@@ -74,8 +76,12 @@ We maintain a comprehensive [HuggingFace Collection](https://huggingface.co/coll
 | `esm2_150m` | ESM2 | 148.2M | Meta AI | [Synthyra/ESM2-150M](https://huggingface.co/Synthyra/ESM2-150M) | [facebook/esm2_t30_150M_UR50D](https://huggingface.co/facebook/esm2_t30_150M_UR50D) |
 | `esm2_650m` | ESM2 | 651.1M | Meta AI | [Synthyra/ESM2-650M](https://huggingface.co/Synthyra/ESM2-650M) | [facebook/esm2_t33_650M_UR50D](https://huggingface.co/facebook/esm2_t33_650M_UR50D) |
 | `esm2_3b` | ESM2 | 2.84B | Meta AI | [Synthyra/ESM2-3B](https://huggingface.co/Synthyra/ESM2-3B) | [facebook/esm2_t36_3B_UR50D](https://huggingface.co/facebook/esm2_t36_3B_UR50D) |
-| `esmplusplus_small` | ESM++ | 333.0M | EvolutionaryScale | [Synthyra/ESMplusplus_small](https://huggingface.co/Synthyra/ESMplusplus_small) | [EvolutionaryScale/esmc-300m](https://huggingface.co/EvolutionaryScale/esmc-300m-2024-12) |
-| `esmplusplus_large` | ESM++ | 575.0M | EvolutionaryScale | [Synthyra/ESMplusplus_large](https://huggingface.co/Synthyra/ESMplusplus_large) | [EvolutionaryScale/esmc-600m](https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12) |
+| `esmplusplus_small` | ESM++ | 333.0M | Biohub | [Synthyra/ESMplusplus_small](https://huggingface.co/Synthyra/ESMplusplus_small) | [biohub/ESMC-300M](https://huggingface.co/biohub/ESMC-300M) |
+| `esmplusplus_large` | ESM++ | 575.0M | Biohub | [Synthyra/ESMplusplus_large](https://huggingface.co/Synthyra/ESMplusplus_large) | [biohub/ESMC-600M](https://huggingface.co/biohub/ESMC-600M) |
+| `esmplusplus_6b` | ESM++ | 6.35B | Biohub | [Synthyra/ESMplusplus_6B](https://huggingface.co/Synthyra/ESMplusplus_6B) | [biohub/ESMC-6B](https://huggingface.co/biohub/ESMC-6B) |
+| `esm3_small` | ESM3 | 1.4B | Biohub | [Synthyra/ESM3_small](https://huggingface.co/Synthyra/ESM3_small) | [biohub/esm3-sm-open-v1](https://huggingface.co/biohub/esm3-sm-open-v1) |
+| `esmfold2` | ESMFold2 | 234.8M + ESMC 6B | Biohub | [Synthyra/ESMFold2](https://huggingface.co/Synthyra/ESMFold2) | [biohub/ESMFold2](https://huggingface.co/biohub/ESMFold2) |
+| `esmfold2_fast` | ESMFold2 | 188.8M + ESMC 6B | Biohub | [Synthyra/ESMFold2-Fast](https://huggingface.co/Synthyra/ESMFold2-Fast) | [biohub/ESMFold2-Fast](https://huggingface.co/biohub/ESMFold2-Fast) |
 | `e1_150m` | E1 | 154.4M | Profluent Bio | [Synthyra/Profluent-E1-150M](https://huggingface.co/Synthyra/Profluent-E1-150M) | [Profluent-Bio/E1-150m](https://huggingface.co/Profluent-Bio/E1-150m) |
 | `e1_300m` | E1 | 274.3M | Profluent Bio | [Synthyra/Profluent-E1-300M](https://huggingface.co/Synthyra/Profluent-E1-300M) | [Profluent-Bio/E1-300m](https://huggingface.co/Profluent-Bio/E1-300m) |
 | `e1_600m` | E1 | 641.4M | Profluent Bio | [Synthyra/Profluent-E1-600M](https://huggingface.co/Synthyra/Profluent-E1-600M) | [Profluent-Bio/E1-600m](https://huggingface.co/Profluent-Bio/E1-600m) |
@@ -92,6 +98,12 @@ We maintain a comprehensive [HuggingFace Collection](https://huggingface.co/coll
 | `ankh3_xl` | ANKH | 3.49B | Elnaggar Lab | [Synthyra/ANKH3_xl](https://huggingface.co/Synthyra/ANKH3_xl) | [ElnaggarLab/ankh3-xl](https://huggingface.co/ElnaggarLab/ankh3-xl) |
 | `esmfold` | ESMFold | 3.53B | Meta AI | [Synthyra/FastESMFold](https://huggingface.co/Synthyra/FastESMFold) | [facebookresearch/esm](https://github.com/facebookresearch/esm) |
 | `boltz2` | Boltz2 | 506.3M | MIT / Various | [Synthyra/Boltz2](https://huggingface.co/Synthyra/Boltz2) | [jwohlwend/boltz](https://github.com/jwohlwend/boltz) |
+
+---
+
+### License Notes
+
+Biohub ESM++ and ESM3 model cards include `license: mit` metadata and upload a `LICENSE` file copied from the Biohub ESM MIT license. The upstream license is linked from each model card and from the source repository at https://github.com/Biohub/esm/blob/main/LICENSE.md.
 
 ---
 
@@ -126,7 +138,7 @@ Building `flash-attn` from source is notoriously painful. The Ninja build system
 
 ### Flex Attention (`flex`)
 
-PyTorch's [`flex_attention`](https://pytorch.org/docs/stable/nn.attention.flex_attention.html) (PyTorch ≥ 2.5) generates a fused Triton kernel customized to the mask pattern at hand. It is numerically very close to SDPA — typically within floating-point rounding of naive computation. The primary advantage is that it can apply a **block mask** that skips padding tokens entirely, providing a meaningful speedup on batches with variable-length sequences (no compute wasted on padding). E1 uses a block-causal variant of this mask.
+PyTorch's [`flex_attention`](https://pytorch.org/docs/stable/nn.attention.flex_attention.html) (PyTorch >= 2.11 in FastPLMs Docker images) generates a fused Triton kernel customized to the mask pattern at hand. It is numerically very close to SDPA, typically within floating-point rounding of naive computation. The primary advantage is that it can apply a **block mask** that skips padding tokens entirely, providing a meaningful speedup on batches with variable-length sequences (no compute wasted on padding). E1 uses a block-causal variant of this mask.
 
 The **first forward pass** triggers JIT compilation via Triton, which can take 30–120 seconds. All subsequent calls are fast. Combining with `torch.compile` yields the best sustained throughput.
 
@@ -269,20 +281,20 @@ FastPLMs includes a pytest-based test suite under `testing/` covering correctnes
 
 | Test | What it checks | Marker |
 | :--- | :--- | :--- |
-| **AutoModel loading** | Every model loads via `AutoModelForMaskedLM.from_pretrained(..., trust_remote_code=True)` and produces valid outputs | `gpu` |
+| **AutoModel loading** | Every model loads via the relevant Transformers auto class with `trust_remote_code=True` and produces valid outputs | `gpu` |
 | **Backend consistency** | SDPA, Flex, and Flash backends produce equivalent predictions (>= 95% agreement) | `gpu` |
-| **Weight compliance** | FastPLM weights are bit-exact with the original implementations (ESM2, ESMC, E1, DPLM) | `slow`, `gpu` |
+| **Weight compliance** | FastPLM weights are bit-exact with the original implementations (ESM2, ESMC, ESM3, E1, DPLM) | `slow`, `gpu` |
 | **Forward compliance** | Forward pass logits/predictions match the originals within tolerance | `slow`, `gpu` |
 | **Rigorous parity** | Per-layer fp32 + bf16 hidden-state and last_hidden_state parity, padding-isolation, tokenizer parity, embed_dataset pipeline parity. Run per family in its own Docker image. | `gpu` |
 | **NaN stability** | Batched inference with padding produces no NaN in real-token embeddings | `gpu` |
 | **Batch-single match** | Batch and single-item embedding produce identical results | `gpu` |
 | **Full model suite** | All of the above across every checkpoint (8M through 3B) | `gpu`, `large` |
 | **Throughput benchmark** | Tokens/sec across models, backends, batch sizes, and sequence lengths | `slow`, `gpu` |
-| **Structure models** | Boltz2 and ESMFold loading + forward pass | `structure`, `slow`, `gpu` |
+| **Structure models** | Boltz2, ESMFold, and ESMFold2 loading + forward/parity checks | `structure`, `slow`, `gpu` |
 
 ### Running Tests with Docker
 
-FastPLMs uses a per-family Docker setup. A single shared base image (`fastplms-base`) holds torch + transformers + the FastPLMs source, and one image per model family (`fastplms-esm2`, `fastplms-esm_plusplus`, `fastplms-e1`, `fastplms-dplm`, `fastplms-dplm2`, `fastplms-ankh`) layers on top with that family's native reference package. This isolates conflicting dependencies (e.g. EvolutionaryScale `esm` vs `fair-esm`, DPLM's torchtext pin) and keeps each image small.
+FastPLMs uses a per-family Docker setup. A single shared base image (`fastplms-base`) holds torch + transformers + the FastPLMs source, and one image per model family (`fastplms-esm2`, `fastplms-esm_plusplus`, `fastplms-esm3`, `fastplms-esmfold2`, `fastplms-e1`, `fastplms-dplm`, `fastplms-dplm2`, `fastplms-ankh`) layers on top with that family's native reference package. This isolates conflicting dependencies (e.g. Biohub `esm` vs `fair-esm`, DPLM's torchtext pin) and keeps each image small.
 
 ```bash
 # Initialize submodules (required before building Docker)
@@ -294,6 +306,8 @@ git submodule update --init --recursive
 # Build a single family
 ./build_images.sh esm2
 ./build_images.sh esm_plusplus
+./build_images.sh esm3
+./build_images.sh esmfold2
 ```
 
 Run the parity / compliance tests for one family inside its image:
@@ -306,6 +320,14 @@ docker run --rm --gpus all --ipc=host -v $(pwd):/workspace fastplms-esm2 \
 # ESM++ (model_key is "esmc")
 docker run --rm --gpus all --ipc=host -v $(pwd):/workspace fastplms-esm_plusplus \
     python -m pytest /workspace/testing/test_parity.py -k esmc -v
+
+# ESM3, requires accepted access to biohub/esm3-sm-open-v1 for official parity
+docker run --rm --gpus all --ipc=host -v $(pwd):/workspace fastplms-esm3 \
+    python -m pytest /workspace/testing/test_parity.py -k esm3 -v
+
+# ESMFold2 / ESMFold2-Fast
+docker run --rm --gpus all --ipc=host -v $(pwd):/workspace fastplms-esmfold2 \
+    python -m pytest /workspace/testing/test_esmfold2.py -v -s
 
 # E1, DPLM, DPLM2, ANKH
 for fam in e1 dplm dplm2 ankh; do
@@ -328,7 +350,7 @@ docker run --gpus all --ipc=host fastplms python -m pytest /app/testing/ -m "not
 # Full suite including 3B models (requires 40+ GB VRAM)
 docker run --gpus all --ipc=host fastplms python -m pytest /app/testing/ -m "not structure" -v
 
-# Structure models only (Boltz2, ESMFold)
+# Structure models only (Boltz2, ESMFold, ESMFold2)
 docker run --gpus all --ipc=host fastplms python -m pytest /app/testing/ -m "structure" -v
 ```
 
@@ -340,7 +362,8 @@ The parity and compliance tests compare FastPLM outputs against the original mod
 
 | Dependency | Used by | Install |
 | :--- | :--- | :--- |
-| `cloudpathlib`, `zstd`, `biotite` (+ `official/esm` submodule on `sys.path`) | ESM++ / ESMC | provided by `Dockerfile.esm_plusplus`; the EvolutionaryScale `esm` package itself is **not** pip-installed because it pins `transformers<4.53.0`. |
+| `cloudpathlib`, `zstd`, `biotite` (+ `official/esm` submodule on `sys.path`) | ESM++ / ESMC, ESM3 official parity | provided by `Dockerfile.esm_plusplus` and `Dockerfile.esm3`; the Biohub `esm` package itself is **not** pip-installed because it depends on a Biohub `transformers` fork. |
+| Biohub `transformers` fork, `rdkit`, `biotite`, `msgpack-numpy`, `pydssp`, `pygtrie`, `py3dmol` | ESMFold2 parity and structure export | provided by `Dockerfile.esmfold2` |
 | `E1` | E1 | `pip install -e official/e1` (or use `Dockerfile.e1`) |
 | `transformers` (`EsmForMaskedLM`, `T5EncoderModel`) | ESM2, DPLM, ANKH | already in `requirements.txt` |
 
@@ -370,10 +393,17 @@ docker run --gpus all -v $(pwd):/workspace fastplms \
 ## Installation & Docker
 
 ### Local Installation
+
+FastPLMs is developed and tested with Python 3.12 and CUDA 12.8. For local GPU
+installs, install the cu128 PyTorch wheels first, then the pinned direct
+dependencies:
+
 ```bash
 git clone --recurse-submodules https://github.com/Synthyra/FastPLMs.git
 cd FastPLMs
-pip install -r requirements.txt
+python -m pip install --upgrade pip==26.1.1 setuptools==70.2.0
+python -m pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r requirements.txt
 ```
 
 If you already cloned without `--recurse-submodules`, initialize submodules separately:
@@ -393,7 +423,7 @@ git submodule update --init --recursive
 ./build_images.sh esm2 esm_plusplus     # subset
 ```
 
-This produces `fastplms-base` and `fastplms-{esm2,esm_plusplus,e1,dplm,dplm2,ankh}`. Run a family's tests in its image:
+This produces `fastplms-base` and `fastplms-{esm2,esm_plusplus,esm3,e1,dplm,dplm2,ankh}`. Run a family's tests in its image:
 
 ```bash
 docker run --rm --gpus all --ipc=host -v $(pwd):/workspace fastplms-esm2 \
@@ -402,7 +432,7 @@ docker run --rm --gpus all --ipc=host -v $(pwd):/workspace fastplms-esm2 \
 docker run --rm --gpus all --ipc=host -v $(pwd):/workspace -it fastplms-esm2 bash
 ```
 
-**Monolithic layout (legacy, single image).** The original `Dockerfile` bundles every dependency that can coexist in one image. Convenient for the broad test suites and throughput benchmarks; not suitable when two families' native deps conflict (notably ESM++ vs `fair-esm`).
+**Monolithic layout (legacy, single image).** The original `Dockerfile` bundles every dependency that can coexist in one image. Convenient for the broad test suites and throughput benchmarks; not suitable when two families' native deps conflict (notably Biohub `esm` vs `fair-esm`).
 
 ```bash
 git submodule update --init --recursive
@@ -478,11 +508,24 @@ If you use FastPLMs, please cite the following along with the relevant model pap
 ### ESM++ (ESMC)
 
 ```bibtex
-@article{hayes2024simulating,
-  title={Simulating 500 million years of evolution with a language model},
-  author={Hayes, Thomas and Rao, Roshan and Akin, Halil and Sofber, Nicholas J and Achour, Divya and Moez, Irfan and Garg, Rhitu and Angelova, Rami and Babu, Manan and Alcaide, Eric and others},
-  journal={bioRxiv},
-  year={2024}
+@misc{candido2026language,
+  title  = {Language Modeling Materializes a World Model of Protein Biology},
+  author = {Candido, Salvatore and Hayes, Thomas and Derry, Alexander and Rao, Roshan
+            and Lin, Zeming and Verkuil, Robert and Wu, Bryan and Lee, Jin Sub
+            and Bruguera, Elise S. and Keval, Jehan A. and Kopylov, Mykhailo
+            and Pak, John E. and Wu, Wesley and Thomas, Neil and Mataraso, Samson
+            and Hsu, Alvin and Trotman-Grant, Ashton C. and Fatras, Kilian
+            and dos Santos Costa, Allan and Badkundri, Rohil and Ak{\i}n, Halil
+            and Oktay, Deniz and Deaton, Jonathan and Montabana, Elizabeth
+            and Sitwala, Hrishita and Yu, Yue and Wiggert, Marius
+            and Carlin, Dylan Alexander and Goering, Anthony W. and Blazejewski, Tomasz
+            and Sandora, McCullen and Hla, Michael and Jia, Tina Z.
+            and Kloker, Leon H. and Sofroniew, Nicholas J. and Uehara, Masatoshi
+            and Pannu, Jassi and Bachas, Sharrol and Liu, Daniel S.
+            and Sercu, Tom and Rives, Alexander},
+  year   = {2026},
+  url    = {https://biohub.ai/papers/esm_protein.pdf},
+  note   = {Preprint}
 }
 ```
 

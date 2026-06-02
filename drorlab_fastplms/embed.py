@@ -73,7 +73,22 @@ def main(argv: list[str] | None = None) -> int:
         default="kernels_flash",
         help="Attention backend: auto (fastest available: flash→flex→sdpa), sdpa (exact/reproducible), flex, kernels_flash (default: kernels_flash)",
     )
-    p.add_argument("--dtype", default="float16", help="Model load dtype: bfloat16, float16, float32")
+    p.add_argument(
+        "--dtype",
+        default="bfloat16",
+        help="Model load dtype: bfloat16 (recommended), float16, float32",
+    )
+    p.add_argument(
+        "--hidden-state-index",
+        type=int,
+        default=-1,
+        help="Hidden-state tuple index for pooling/embeddings (-1 = last layer, default)",
+    )
+    p.add_argument(
+        "--store-all-hidden-states",
+        action="store_true",
+        help="Store all layer hidden states (requires --full-embeddings; not supported with .zarr)",
+    )
     p.add_argument("--no-entrypoint-setup", action="store_true", help="Skip entrypoint_setup import")
     p.add_argument(
         "--e1-combined-col",
@@ -242,6 +257,13 @@ def main(argv: list[str] | None = None) -> int:
     use_sql = out_path.lower().endswith(".db")
     use_zarr = out_path.lower().endswith(".zarr")
 
+    if args.store_all_hidden_states and not args.full_embeddings:
+        print("--store-all-hidden-states requires --full-embeddings", file=sys.stderr)
+        return 2
+    if args.store_all_hidden_states and use_zarr:
+        print("--store-all-hidden-states is not supported with .zarr output yet", file=sys.stderr)
+        return 2
+
     dtype = resolve_torch_dtype(args.dtype)
     device = default_device()
     load_model_t0 = time.perf_counter()
@@ -258,7 +280,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.timing:
         print(f"[timing] model_load_s={time.perf_counter() - load_model_t0:.3f}")
 
-    tokenizer = None if e1 else model.tokenizer
+    # E1: sequence mode (tokenizer=None). Tokenizer models: None lets embed_dataset use model.tokenizer
+    # (checkpoint-matched after upstream ANKH tokenizer fix).
+    tokenizer = None
     pooling = parse_pooling(args.pooling)
 
     kwargs = dict(
@@ -275,6 +299,8 @@ def main(argv: list[str] | None = None) -> int:
         sql=use_sql,
         sql_db_path=out_path if use_sql else "embeddings.db",
         padding="longest",
+        hidden_state_index=args.hidden_state_index,
+        store_all_hidden_states=args.store_all_hidden_states,
     )
 
     sequence_to_id: dict[str, str] | None = None
@@ -339,6 +365,7 @@ def main(argv: list[str] | None = None) -> int:
                     full_embeddings=args.full_embeddings,
                     embed_dtype=torch.float32,
                     pooling_types=pooling,
+                    hidden_state_index=args.hidden_state_index,
                     timing=args.timing,
                 )
             else:

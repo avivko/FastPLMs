@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data import Dataset as TorchDataset
 from tqdm.auto import tqdm
 
-from fastplms.embedding_mixin import Pooler, build_collator
+from fastplms.embedding_mixin import Pooler, _trim_full_embedding, build_collator
 from drorlab_fastplms.embedding_blob import embedding_blob_to_tensor
 
 try:
@@ -253,6 +253,7 @@ def export_embeddings_to_zarr(
     full_embeddings: bool,
     embed_dtype: torch.dtype,
     pooling_types: List[str],
+    hidden_state_index: int = -1,
     num_workers: int = 0,
     timing: bool = False,
 ) -> None:
@@ -312,7 +313,7 @@ def export_embeddings_to_zarr(
                 starts_batch: List[int] = []
                 lens_batch: List[int] = []
                 for seq, emb, mask in zip(batch_seqs, emb_cpu, mask_cpu):
-                    trimmed = emb[mask].to(torch.float32).numpy()
+                    trimmed = _trim_full_embedding(emb, mask).to(torch.float32).numpy()
                     per_seq.append(trimmed)
                     starts_batch.append(residue_cursor)
                     l = int(trimmed.shape[0])
@@ -367,12 +368,20 @@ def export_embeddings_to_zarr(
                 batch_seqs = to_embed[i * batch_size:(i + 1) * batch_size]
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
-                residue_embeddings = model._embed(input_ids, attention_mask)
+                residue_embeddings = model._embed(
+                    input_ids,
+                    attention_mask,
+                    hidden_state_index=hidden_state_index,
+                )
                 handle_batch(batch_seqs, residue_embeddings, attention_mask)
         else:
             for batch_start in tqdm(range(0, len(to_embed), batch_size), desc="Embedding batches (zarr)"):
                 batch_seqs = to_embed[batch_start:batch_start + batch_size]
-                out = model._embed(batch_seqs, return_attention_mask=True)
+                out = model._embed(
+                    batch_seqs,
+                    return_attention_mask=True,
+                    hidden_state_index=hidden_state_index,
+                )
                 assert isinstance(out, tuple) and len(out) == 2
                 residue_embeddings, attention_mask = out
                 handle_batch(batch_seqs, residue_embeddings, attention_mask)

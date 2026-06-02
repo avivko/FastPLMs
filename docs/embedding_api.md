@@ -1,6 +1,6 @@
 # Embedding & Pooling API
 
-The `EmbeddingMixin` class (`fastplms/embedding_mixin.py`) provides a standardized interface for extracting protein representations from any FastPLMs sequence model.
+The `EmbeddingMixin` class (`fastplms/embedding_mixin.py`) provides a standardized interface for extracting protein representations from tokenizer-based FastPLMs sequence models and E1. ESM3 exposes the same `embed_dataset()` user API through its wrapper.
 
 ## Pooler
 
@@ -73,7 +73,7 @@ embeddings = model.embed_dataset(
 |-----------|------|---------|-------------|
 | `sequences` | `List[str]` | `None` | Protein sequences to embed |
 | `fasta_path` | `str` | `None` | Path to a FASTA file; sequences are parsed and combined with `sequences` |
-| `tokenizer` | `PreTrainedTokenizerBase` | `None` | Tokenizer for tokenizer-mode models. Pass `None` for E1 (sequence mode) |
+| `tokenizer` | `PreTrainedTokenizerBase` | `None` | Tokenizer for tokenizer-mode models. Defaults to `model.tokenizer` when available. Pass `None` for E1 sequence mode |
 | `batch_size` | `int` | `2` | Batch size for inference |
 | `max_len` | `int` | `512` | Maximum sequence length (longer sequences are truncated if `truncate=True`) |
 | `truncate` | `bool` | `True` | Whether to truncate sequences exceeding `max_len` |
@@ -85,6 +85,8 @@ embeddings = model.embed_dataset(
 | `sql_db_path` | `str` | `"embeddings.db"` | Path to SQLite database |
 | `save` | `bool` | `True` | Save embeddings to `.pth` file |
 | `save_path` | `str` | `"embeddings.pth"` | Path to `.pth` output file |
+| `hidden_state_index` | `int` | `-1` | Hidden-state tuple index to embed from. `-1` preserves current last-hidden-state behavior |
+| `store_all_hidden_states` | `bool` | `False` | Store every hidden state as layer-first token-wise embeddings. Requires `full_embeddings=True` |
 
 At least one of `sequences` or `fasta_path` must be provided. If both are given, the two sources are merged.
 
@@ -104,15 +106,14 @@ At least one of `sequences` or `fasta_path` must be provided. If both are given,
 
 **Tokenizer mode** (ESM2, ESM++, DPLM, DPLM2):
 ```python
-# Provide the tokenizer
+# The model tokenizer is used by default
 embeddings = model.embed_dataset(
     sequences=sequences,
-    tokenizer=model.tokenizer,  # or a custom wrapper
     batch_size=32,
 )
 ```
 
-The mixin builds a `DataLoader` with `build_collator(tokenizer)` and calls `_embed(input_ids, attention_mask)`.
+The mixin builds a `DataLoader` with `build_collator(tokenizer)` and calls `_embed(input_ids, attention_mask)`. Pass `tokenizer=...` only when you need a custom tokenizer wrapper.
 
 **Sequence mode** (E1):
 ```python
@@ -126,6 +127,69 @@ embeddings = model.embed_dataset(
 
 The mixin iterates over chunks and calls `_embed(sequences, return_attention_mask=True)`, which returns `(embeddings, attention_mask)`.
 
+**ESM3 wrapper mode**:
+```python
+embeddings = model.embed_dataset(
+    sequences=sequences,
+    batch_size=4,
+    pooling_types=["mean", "cls"],
+)
+```
+
+ESM3 supports pooled `mean`, `cls`, and `max` embeddings, plus residue-wise embeddings with `full_embeddings=True`. SQLite streaming is not enabled for ESM3.
+
+---
+
+## Hidden-State Selection
+
+By default, `embed_dataset()` embeds from the same final representation as before. Pass `hidden_state_index` when you want pooling from a specific hidden-state tuple entry:
+
+```python
+embeddings = model.embed_dataset(
+    sequences=sequences,
+    batch_size=32,
+    pooling_types=["mean"],
+    hidden_state_index=12,
+)
+```
+
+To save token-wise embeddings for every hidden state, use `store_all_hidden_states=True` with `full_embeddings=True`:
+
+```python
+model.embed_dataset(
+    sequences=sequences,
+    batch_size=4,
+    full_embeddings=True,
+    store_all_hidden_states=True,
+    sql=True,
+    sql_db_path="all_layers.db",
+)
+```
+
+Saved all-layer tensors are layer-first per sequence:
+
+```python
+embeddings["MALWMRLL..."].shape == (num_hidden_states, num_real_tokens, hidden_size)
+```
+
+You can later pool a selected layer without rerunning the model:
+
+```python
+pooled = model.load_pooled_embeddings_from_db(
+    "all_layers.db",
+    pooling_types=["mean", "cls"],
+    hidden_state_index=12,
+)
+
+pooled_pth = model.load_pooled_embeddings_from_pth(
+    "all_layers.pth",
+    pooling_types=["mean"],
+    hidden_state_index=-1,
+)
+```
+
+`pool_embeddings()` provides the same conversion for an in-memory dictionary returned by `load_embeddings_from_pth()` or `load_embeddings_from_db()`.
+
 ---
 
 ## Storage Formats
@@ -135,7 +199,7 @@ The mixin iterates over chunks and calls `_embed(sequences, return_attention_mas
 A dictionary serialized via `torch.save`:
 ```python
 {
-    "MALWMRLLPLLALL": tensor(...),  # shape: (hidden_size,) or (seq_len, hidden_size)
+    "MALWMRLLPLLALL": tensor(...),  # (hidden_size,), (seq_len, hidden_size), or (num_hidden_states, seq_len, hidden_size)
     "MKTLLILAVVAAALA": tensor(...),
 }
 ```
@@ -151,15 +215,11 @@ Schema:
 ```sql
 CREATE TABLE embeddings (
     sequence TEXT PRIMARY KEY,
-    embedding BLOB NOT NULL,
-    shape TEXT,
-    dtype TEXT
+    embedding BLOB NOT NULL
 );
 ```
 
-- `embedding`: Raw bytes from `numpy.ndarray.tobytes()`
-- `shape`: Comma-separated dimension string (e.g., `"320"` or `"64,320"`)
-- `dtype`: NumPy dtype string (e.g., `"float32"`)
+- `embedding`: Compact tensor blob containing dtype, rank, shape, and raw bytes
 
 Load with:
 ```python
@@ -170,7 +230,7 @@ embeddings = model.load_embeddings_from_db("embeddings.db")
 embeddings = model.load_embeddings_from_db("embeddings.db", sequences=["MALWMRLLPLLALL"])
 ```
 
-SQLite mode commits every 100 batches during embedding to avoid data loss on interruption.
+SQLite mode writes asynchronously and commits when the writer queue drains.
 
 ---
 
@@ -211,7 +271,7 @@ embeddings = model.embed_dataset(
     full_embeddings=True,
     save=False,
 )
-# embeddings["MALWMRLL..."].shape == (seq_len_without_special_tokens, hidden_size)
+# embeddings["MALWMRLL..."].shape == (num_real_tokens, hidden_size)
 ```
 
-Each sequence's embedding has shape `(num_real_tokens, hidden_size)` where `num_real_tokens` excludes padding, BOS, and EOS tokens.
+Each sequence's embedding has shape `(num_real_tokens, hidden_size)` for one hidden state, or `(num_hidden_states, num_real_tokens, hidden_size)` when `store_all_hidden_states=True`. `num_real_tokens` excludes padding according to the model attention mask.

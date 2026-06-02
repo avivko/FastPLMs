@@ -3,7 +3,7 @@
 # Contains torch, transformers, pinned numpy, project source code -- everything
 # that every family needs. Does NOT install any family-specific native/official
 # package; those live in family Dockerfiles to avoid dependency conflicts
-# (e.g. EvolutionaryScale `esm` pins `transformers<4.53.0`, DPLM pins
+# (e.g. Biohub `esm` depends on a Biohub transformers fork, DPLM pins
 # torchtext==0.17.0).
 #
 # Build:
@@ -43,7 +43,7 @@ WORKDIR /app
 
 COPY requirements.txt .
 
-RUN pip install --upgrade pip setuptools
+RUN pip install --upgrade pip==26.1.1 setuptools==70.2.0
 # Install cu128 torch BEFORE requirements.txt so transformers/accelerate/etc
 # see torch already satisfied, then AGAIN after in case a transitive dep
 # silently overwrites it with the PyPI default (CUDA 13) wheel.

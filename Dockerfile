@@ -34,13 +34,13 @@ WORKDIR /app
 COPY requirements.txt .
 COPY official/ official/
 
-RUN pip install --upgrade pip setuptools
+RUN pip install --upgrade pip==26.1.1 setuptools==70.2.0
 
 # Install official repos from submodules for compliance testing.
 # - E1: pip install -e (needed by testing/official/e1.py)
 # - DPLM: NOT installed (pins torchtext==0.17.0 which is incompatible).
 #   Compliance uses transformers.EsmForMaskedLM directly. Submodule is for reference only.
-# - ESM (EvolutionaryScale): NOT pip installed (conflicts with fair-esm on `import esm`).
+# - ESM (Biohub): NOT pip installed (uses the same top-level `esm` package name).
 #   testing/official/esm_plusplus.py adds the submodule to sys.path on demand.
 RUN pip install -e /app/official/e1
 

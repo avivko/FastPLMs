@@ -3,8 +3,11 @@
 ## Getting Started
 
 1. Fork the repository and clone your fork
-2. Install dependencies: `pip install -r requirements.txt`
-3. Tests run in Docker only (see below)
+2. Use Python 3.12 (`.python-version` pins 3.12.3 for pyenv/uv-style tools)
+3. Pin packaging tools: `python -m pip install --upgrade pip==26.1.1 setuptools==70.2.0`
+4. Install cu128 PyTorch: `python -m pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128`
+5. Install pinned direct dependencies: `python -m pip install -r requirements.txt`
+6. Tests run in Docker only (see below)
 
 ## Code Style
 
@@ -50,7 +53,7 @@ from transformers import (
 fastplms/new_model/
     __init__.py
     modeling_new_model.py    # PreTrainedModel + PretrainedConfig
-    get_new_model_weights.py # Weight conversion from official checkpoint
+    get_weights.py           # Weight conversion from official checkpoint
     README.md                # HuggingFace model card README
     LICENSE                  # Model license
 
@@ -78,7 +81,7 @@ Your `modeling_*.py` should:
 
 ### 3. Add Weight Conversion
 
-`get_*_weights.py` should:
+`get_weights.py` should:
 1. Load the official checkpoint
 2. Remap parameter names to match your architecture
 3. Export `config.json`, `pytorch_model.bin`, and modeling source files
