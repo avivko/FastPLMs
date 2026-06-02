@@ -41,6 +41,7 @@
 # existing stage from OUTPUT before running. Disable staging entirely with FASTPLMS_NO_EMBED_STAGE=1
 # (legacy alias: FASTPLMS_NO_EMBED_DB_STAGE=1). Inspect stage dirs:
 #   python drorlab_fastplms/embed_stage.py lookup <hash> $SCRATCH/fastplms_workspace
+# Pass --overwrite-no-resume (to embed.py args) to delete existing Oak OUTPUT and all scratch stages first.
 
 set -euo pipefail
 
@@ -54,6 +55,14 @@ MODEL=$1
 INPUT=$2
 OUTPUT=$3
 shift 3
+
+_OVERWRITE_NO_RESUME=0
+for _arg in "$@"; do
+  if [[ "$_arg" == "--overwrite-no-resume" ]]; then
+    _OVERWRITE_NO_RESUME=1
+    break
+  fi
+done
 
 SIF="${SIF:-/oak/stanford/groups/rondror/software/plms/singularity/fastplms.sif}"
 REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-.}}"
@@ -198,6 +207,15 @@ _sync_tree() {
 
 _NO_STAGE="${FASTPLMS_NO_EMBED_STAGE:-${FASTPLMS_NO_EMBED_DB_STAGE:-0}}"
 _REFRESH_STAGE_FROM_OUTPUT="${FASTPLMS_REFRESH_STAGE_FROM_OUTPUT:-0}"
+if [[ "$_OVERWRITE_NO_RESUME" == "1" ]]; then
+  PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}" python3 - "$OUTPUT" "${SCRATCH}/fastplms_workspace" <<'PY'
+import sys
+from drorlab_fastplms.embed_stage import prepare_fresh_embed
+
+prepare_fresh_embed(sys.argv[1], sys.argv[2])
+print("sbatch_embed: --overwrite-no-resume deleted existing Oak OUTPUT and scratch stages", file=sys.stderr)
+PY
+fi
 if [[ "$_NO_STAGE" != "1" ]] && [[ "${OUTPUT,,}" == *.db || "${OUTPUT,,}" == *.zarr ]]; then
   mapfile -t _STAGE_PATHS < <(
     PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}" python3 - "$OUTPUT" "${SCRATCH}/fastplms_workspace" <<'PY'

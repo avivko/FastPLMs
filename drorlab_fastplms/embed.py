@@ -47,6 +47,7 @@ from drorlab_fastplms.zarr_export import (
     default_db_path_for_zarr,
     export_embeddings_to_zarr,
 )
+from drorlab_fastplms.embed_stage import clear_embed_output_at
 
 
 def parse_pooling(s: str) -> list[str]:
@@ -179,6 +180,14 @@ def main(argv: list[str] | None = None) -> int:
             "If a newer staged DB exists on scratch, it is preferred automatically."
         ),
     )
+    p.add_argument(
+        "--overwrite-no-resume",
+        action="store_true",
+        help=(
+            "Start fresh: delete any existing output at --output (and sidecars) before embedding. "
+            "With sbatch_embed, also deletes the final Oak OUTPUT and all scratch stage dirs first."
+        ),
+    )
     args = p.parse_args(argv)
     stage_t0 = time.perf_counter()
 
@@ -297,6 +306,13 @@ def main(argv: list[str] | None = None) -> int:
     use_sql = out_path.lower().endswith(".db")
     use_zarr = out_path.lower().endswith(".zarr")
 
+    if args.overwrite_no_resume:
+        removed = clear_embed_output_at(out_path)
+        if removed:
+            print(f"[overwrite-no-resume] Removed {len(removed)} existing path(s) at {out_path!r}.")
+        else:
+            print(f"[overwrite-no-resume] No existing output at {out_path!r}.")
+
     full_embeddings, pooling, mode_err = resolve_embed_output_mode(
         args.pooling,
         args.store_all_hidden_states,
@@ -362,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with torch.inference_mode():
             if use_zarr:
-                if args.zarr_resume_from_db is not None:
+                if args.zarr_resume_from_db is not None and not args.overwrite_no_resume:
                     if args.zarr_resume_from_db == "__AUTO__":
                         db_hints = [default_db_path_for_zarr(out_path)]
                         final_out = os.environ.get("FASTPLMS_FINAL_OUTPUT")

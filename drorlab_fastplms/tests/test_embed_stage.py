@@ -6,11 +6,14 @@ import pytest
 from drorlab_fastplms.embed_stage import (
     STAGE_OUTPUT_METADATA,
     basename_hash_stage_dir_name,
+    clear_all_stage_dirs,
+    clear_embed_output_at,
     infer_staged_db_candidate,
     legacy_stage_dir_name,
     lookup_stage_hash,
     output_stage_hash,
     output_stage_label,
+    prepare_fresh_embed,
     read_stage_metadata,
     resolve_embed_stage,
     stage_dir_name,
@@ -147,3 +150,62 @@ def test_basename_hash_scheme_still_resolves(tmp_path) -> None:
     assert info["scheme"] == "basename_hash"
     assert info["stage_host"] == str(host)
     assert basename_hash_stage_dir_name(output) in str(info["stage_rel_dir"])
+
+
+def test_clear_embed_output_at_removes_db_zarr_and_sidecars(tmp_path) -> None:
+    db = tmp_path / "job" / "embeddings.db"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"db")
+    (tmp_path / "job" / "embeddings.db-wal").write_bytes(b"wal")
+    (tmp_path / "job" / "embeddings.db-shm").write_bytes(b"shm")
+
+    removed = clear_embed_output_at(str(db))
+    assert not db.exists()
+    assert len(removed) == 3
+
+    zarr = tmp_path / "job2" / "embeddings.zarr"
+    manifest = tmp_path / "job2" / "embeddings_manifest.csv"
+    zarr.mkdir(parents=True)
+    (zarr / "meta").write_text("x")
+    manifest.write_text("row_index,sequence\n")
+
+    removed = clear_embed_output_at(str(zarr))
+    assert not zarr.exists()
+    assert not manifest.exists()
+    assert str(zarr) in removed
+
+
+def test_clear_all_stage_dirs_removes_every_naming_scheme(tmp_path) -> None:
+    output = "/oak/groups/me/runs/job/embeddings.db"
+    dirs = [
+        tmp_path / staged_artifact_relpath(output, scheme="named"),
+        tmp_path / staged_artifact_relpath(output, scheme="basename_hash"),
+        tmp_path / staged_artifact_relpath(output, scheme="hash_basename"),
+        tmp_path / staged_artifact_relpath(output, scheme="legacy"),
+    ]
+    for rel in dirs:
+        rel.parent.mkdir(parents=True, exist_ok=True)
+        rel.write_bytes(b"x")
+
+    removed = clear_all_stage_dirs(output, str(tmp_path))
+    assert len(removed) == 4
+    assert not any(rel.exists() for rel in dirs)
+
+
+def test_prepare_fresh_embed_clears_output_and_stages(tmp_path) -> None:
+    oak = tmp_path / "oak" / "job" / "embeddings.zarr"
+    oak.mkdir(parents=True)
+    manifest = tmp_path / "oak" / "job" / "embeddings_manifest.csv"
+    manifest.write_text("row_index,sequence\n")
+    output = str(oak)
+
+    stage_rel = staged_artifact_relpath(output, scheme="legacy")
+    stage_host = tmp_path / "fastplms_workspace" / stage_rel
+    stage_host.parent.mkdir(parents=True)
+    stage_host.mkdir()
+
+    info = prepare_fresh_embed(output, str(tmp_path / "fastplms_workspace"))
+    assert not oak.exists()
+    assert not manifest.exists()
+    assert not stage_host.exists()
+    assert info["scheme"] == "named"

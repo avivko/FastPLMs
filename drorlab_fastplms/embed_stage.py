@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import sys
 from typing import List, Optional, Tuple
 
@@ -99,6 +100,62 @@ def read_stage_metadata(stage_dir_host: str) -> Optional[str]:
     with open(meta_path, encoding="utf-8") as f:
         line = f.readline().strip()
     return line or None
+
+
+def embed_sidecar_paths(output_path: str) -> List[str]:
+    """Known companion files for an embedding OUTPUT path."""
+    trimmed = output_path.rstrip("/")
+    lower = trimmed.lower()
+    sidecars: List[str] = []
+    if lower.endswith(".db"):
+        sidecars.extend([f"{trimmed}-wal", f"{trimmed}-shm"])
+    elif lower.endswith(".zarr") or lower.endswith(".pth"):
+        sidecars.append(f"{os.path.splitext(trimmed)[0]}_manifest.csv")
+    return sidecars
+
+
+def clear_embed_output_at(output_path: str) -> List[str]:
+    """Remove embedding artifact at ``output_path`` and known sidecars."""
+    removed: List[str] = []
+    trimmed = output_path.rstrip("/")
+    lower = trimmed.lower()
+
+    if lower.endswith(".zarr"):
+        if os.path.isdir(trimmed):
+            shutil.rmtree(trimmed)
+            removed.append(trimmed)
+    elif os.path.isfile(trimmed) or os.path.islink(trimmed):
+        os.remove(trimmed)
+        removed.append(trimmed)
+
+    for sidecar in embed_sidecar_paths(trimmed):
+        if os.path.isfile(sidecar) or os.path.islink(sidecar):
+            os.remove(sidecar)
+            removed.append(sidecar)
+    return removed
+
+
+def clear_all_stage_dirs(output_path: str, workspace_host: str) -> List[str]:
+    """Remove all known stage directory variants for ``output_path``."""
+    ws = workspace_host.rstrip("/")
+    removed: List[str] = []
+    seen: set[str] = set()
+    for rel_dir, _ in iter_stage_dir_candidates(output_path):
+        host_dir = os.path.join(ws, rel_dir)
+        if host_dir in seen or not os.path.isdir(host_dir):
+            seen.add(host_dir)
+            continue
+        seen.add(host_dir)
+        shutil.rmtree(host_dir)
+        removed.append(host_dir)
+    return removed
+
+
+def prepare_fresh_embed(output_path: str, workspace_host: str) -> dict[str, object]:
+    """Delete final OUTPUT and all scratch stages, then resolve a fresh stage path."""
+    clear_embed_output_at(output_path)
+    clear_all_stage_dirs(output_path, workspace_host)
+    return resolve_embed_stage(output_path, workspace_host)
 
 
 def _artifact_exists(path: str, *, is_zarr: bool) -> bool:
