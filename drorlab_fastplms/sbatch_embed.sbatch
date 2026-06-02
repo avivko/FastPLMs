@@ -33,11 +33,14 @@
 #
 # Stageable outputs (*.db, *.zarr): by default stage on $SCRATCH for fast local I/O, then sync back
 # to final OUTPUT after the job. Stage path is stable per OUTPUT so a new job can resume from the
-# latest staged artifact after interrupted runs. Existing staged data is trusted over OUTPUT by
-# default so interrupted publishes do not poison resume state. Set FASTPLMS_REFRESH_STAGE_FROM_OUTPUT=1
-# to explicitly replace an existing stage from OUTPUT before running. Disable staging entirely with
-# FASTPLMS_NO_EMBED_STAGE=1
-# (legacy alias: FASTPLMS_NO_EMBED_DB_STAGE=1).
+# latest staged artifact after interrupted runs. Stage dirs are named
+# <parent_folder>_<hash> (e.g. ankh3_Dataset_Rhodopsins_..._<hash>; older hash-only,
+# hash_basename, and basename_hash dirs are still picked up). Each stage dir gets
+# oak_output_path.txt with the full final OUTPUT path. Existing staged data is trusted over OUTPUT by default so interrupted publishes
+# do not poison resume state. Set FASTPLMS_REFRESH_STAGE_FROM_OUTPUT=1 to explicitly replace an
+# existing stage from OUTPUT before running. Disable staging entirely with FASTPLMS_NO_EMBED_STAGE=1
+# (legacy alias: FASTPLMS_NO_EMBED_DB_STAGE=1). Inspect stage dirs:
+#   python drorlab_fastplms/embed_stage.py lookup <hash> $SCRATCH/fastplms_workspace
 
 set -euo pipefail
 
@@ -196,12 +199,27 @@ _sync_tree() {
 _NO_STAGE="${FASTPLMS_NO_EMBED_STAGE:-${FASTPLMS_NO_EMBED_DB_STAGE:-0}}"
 _REFRESH_STAGE_FROM_OUTPUT="${FASTPLMS_REFRESH_STAGE_FROM_OUTPUT:-0}"
 if [[ "$_NO_STAGE" != "1" ]] && [[ "${OUTPUT,,}" == *.db || "${OUTPUT,,}" == *.zarr ]]; then
-  _OUT_KEY="$(printf '%s' "$OUTPUT" | sha1sum | awk '{print $1}')"
+  mapfile -t _STAGE_PATHS < <(
+    PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}" python3 - "$OUTPUT" "${SCRATCH}/fastplms_workspace" <<'PY'
+import os
+import sys
+from drorlab_fastplms.embed_stage import resolve_embed_stage, write_stage_metadata
+
+output_path = sys.argv[1]
+workspace = sys.argv[2]
+info = resolve_embed_stage(output_path, workspace)
+stage_dir_host = os.path.join(workspace, info["stage_rel_dir"])
+write_stage_metadata(stage_dir_host, output_path)
+print(info["stage_host"])
+print(info["run_output"])
+print(info["stage_rel_dir"])
+PY
+  )
+  _EMBED_STAGE_HOST="${_STAGE_PATHS[0]}"
+  RUN_OUTPUT="${_STAGE_PATHS[1]}"
+  _STAGE_REL="${_STAGE_PATHS[2]}"
   _OUT_BASE="$(basename "$OUTPUT")"
-  _STAGE_REL="embed_stage/by_output/${_OUT_KEY}"
-  mkdir -p "${SCRATCH}/fastplms_workspace/${_STAGE_REL}"
-  _EMBED_STAGE_HOST="${SCRATCH}/fastplms_workspace/${_STAGE_REL}/${_OUT_BASE}"
-  RUN_OUTPUT="/workspace/${_STAGE_REL}/${_OUT_BASE}"
+  mkdir -p "$(dirname "${_EMBED_STAGE_HOST}")"
   if [[ "${OUTPUT,,}" == *.db ]]; then
     _EMBED_STAGE_KIND="db"
     _sbatch_embed_msg "sbatch_embed: staging SQLite OUTPUT on SCRATCH (${_EMBED_STAGE_HOST}) — final destination: ${OUTPUT}"

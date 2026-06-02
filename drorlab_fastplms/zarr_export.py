@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import os
 import sqlite3
 from pathlib import Path
@@ -118,18 +117,9 @@ def default_db_path_for_zarr(zarr_path: str) -> str:
 
 def infer_staged_db_candidate(db_path: str) -> Optional[str]:
     """Infer stable staged DB path used by sbatch_embed.sbatch."""
-    key = hashlib.sha1(db_path.encode("utf-8")).hexdigest()
-    base = os.path.basename(db_path)
-    rel = os.path.join("embed_stage", "by_output", key, base)
-    candidates: List[str] = []
-    scratch = os.environ.get("SCRATCH")
-    if scratch:
-        candidates.append(os.path.join(scratch, "fastplms_workspace", rel))
-    candidates.append(os.path.join("/workspace", rel))
-    for p in candidates:
-        if os.path.isfile(p):
-            return p
-    return None
+    from drorlab_fastplms.embed_stage import infer_staged_db_candidate as _infer
+
+    return _infer(db_path)
 
 
 def choose_resume_db_path(db_path: str, prefer_staged: bool = True) -> Optional[str]:
