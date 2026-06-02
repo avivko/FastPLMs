@@ -180,19 +180,34 @@ class EmbeddingZarrReader:
         self.manifest_path = manifest_path
         self._seq_to_row: Dict[str, int] = {}
         self._row_to_seq: List[str] = []
+        row_index_mismatches = 0
         with open(manifest_path, "r", newline="") as f:
             reader = csv.DictReader(f)
-            for row in reader:
+            for line_no, row in enumerate(reader, start=2):
                 seq = str(row["sequence"])
-                row_idx = int(row["row_index"])
-                if row_idx != len(self._row_to_seq):
+                expected_idx = len(self._row_to_seq)
+                try:
+                    declared_idx = int(row["row_index"])
+                except (KeyError, TypeError, ValueError) as exc:
                     raise ValueError(
-                        f"Manifest row_index mismatch at {manifest_path}: "
-                        f"got {row_idx}, expected {len(self._row_to_seq)}"
-                    )
+                        f"Invalid manifest row at {manifest_path} line {line_no}: {exc}"
+                    ) from exc
+                if declared_idx != expected_idx:
+                    row_index_mismatches += 1
+                    if row_index_mismatches <= 5:
+                        print(
+                            f"Warning: {manifest_path} line {line_no}: row_index={declared_idx} "
+                            f"but CSV row order implies {expected_idx}; using row order for Zarr lookup."
+                        )
                 self._row_to_seq.append(seq)
                 if seq not in self._seq_to_row:
-                    self._seq_to_row[seq] = row_idx
+                    self._seq_to_row[seq] = expected_idx
+        if row_index_mismatches:
+            print(
+                f"Warning: {row_index_mismatches} manifest row(s) in {manifest_path} had "
+                f"row_index != line order (common after interrupted Zarr resume). "
+                f"Loaded {len(self._row_to_seq)} sequences by CSV order."
+            )
 
         self._num_hidden_states = int(self._root.attrs.get("num_hidden_states", 1))
 
@@ -200,18 +215,27 @@ class EmbeddingZarrReader:
             self._residues = self._root["residues"]
             self._row_start = self._root["row_start"]
             self._row_length = self._root["row_length"]
-            if int(self._row_start.shape[0]) != len(self._row_to_seq):
-                raise ValueError(
-                    "Zarr full embedding index length mismatch: "
-                    f"row_start={int(self._row_start.shape[0])} manifest={len(self._row_to_seq)}"
-                )
+            n_zarr_rows = int(self._row_start.shape[0])
         else:
             self._pooled = self._root["pooled"]
-            if int(self._pooled.shape[0]) != len(self._row_to_seq):
-                raise ValueError(
-                    "Zarr pooled length mismatch: "
-                    f"pooled={int(self._pooled.shape[0])} manifest={len(self._row_to_seq)}"
-                )
+            n_zarr_rows = int(self._pooled.shape[0])
+
+        n_manifest = len(self._row_to_seq)
+        if n_manifest > n_zarr_rows:
+            extra = n_manifest - n_zarr_rows
+            print(
+                f"Warning: manifest lists {n_manifest} sequences but Zarr index has {n_zarr_rows}; "
+                f"ignoring the last {extra} manifest row(s). "
+                f"Re-run convert_db_to_zarr or rewrite {manifest_path} to fix permanently."
+            )
+            self._row_to_seq = self._row_to_seq[:n_zarr_rows]
+            self._seq_to_row = {seq: i for i, seq in enumerate(self._row_to_seq)}
+        elif n_manifest < n_zarr_rows:
+            raise ValueError(
+                "Zarr embedding index has more rows than manifest: "
+                f"zarr={n_zarr_rows} manifest={n_manifest} at {manifest_path}. "
+                "Re-export or rebuild the manifest from the Zarr store."
+            )
 
     def close(self) -> None:
         # zarr arrays are lazily accessed; no explicit close needed.
