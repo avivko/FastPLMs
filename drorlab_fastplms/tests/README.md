@@ -5,7 +5,9 @@ Pytests live in this directory. Markers:
 | Marker | Files | What |
 |--------|-------|------|
 | `embedding_blob` | `test_embedding_blob.py` | Compact blob decode vs hand-built bytes; optional parity with `fastplms.embedding_mixin` when importable. |
-| `embedding_loader` | `test_embedding_loader.py` | `embedding_loader` SQLite / `.pth` / residue selection (uses `blob_test_utils` for float32 blobs). |
+| `embedding_loader` | `test_embedding_loader.py` | `embedding_loader` SQLite / `.pth` / Zarr / residue selection (uses `blob_test_utils` for float32 blobs). |
+| `embed` | `test_embed_output_mode.py`, `test_embed_cli.py` | `embed.py` default per-residue output, `--pooling`, `--store-all-hidden-states` (GPU tests need CUDA). |
+| `gpu` | `test_embed_cli.py`, `test_e1_multiseq_embed.py`, … | CUDA required. |
 
 ## Local (repo root)
 
@@ -15,6 +17,8 @@ export PYTHONPATH=/path/to/FastPLMs
 # One marker
 pytest drorlab_fastplms/tests -m embedding_blob -v
 pytest drorlab_fastplms/tests -m embedding_loader -v
+pytest drorlab_fastplms/tests -m "embed and not gpu" -v
+pytest drorlab_fastplms/tests -m embed -v   # includes GPU embed integration
 
 # Everything under this folder
 pytest drorlab_fastplms/tests -v
@@ -27,7 +31,7 @@ Same layout as Slurm: **`fastplms`** has **`fastplms` on `/app`**; mount the rep
 From the **FastPLMs repo root** on the host (after `docker build -t fastplms .` if needed):
 
 ```bash
-# Drorlab tests (embedding_blob | embedding_loader | all)
+# Drorlab tests (embedding_blob | embedding_loader | embed | all; embed GPU needs --gpus)
 docker run --rm \
   -v "$(pwd)":/workspace/repo -v /tmp/fp_ws:/workspace \
   -e HF_HOME=/workspace/.cache/huggingface -e XDG_CACHE_HOME=/workspace/.cache \

@@ -21,9 +21,13 @@ BS_FT=(--epochs 1 --batch-size 4 --no-lora)
 
 mkdir -p "$OUT"
 
-echo "=== Drorlab smoke: embed ESM2 (CSV) ==="
+echo "=== Drorlab smoke: embed ESM2 (CSV, default per-residue) ==="
 python "$EMBED" --model "$ESM2" --input "$EX/sequences_example.csv" \
   --output "$OUT/embed_esm2_csv.pth" --seq-col sequence "${ATTN[@]}" "${BS_EMB[@]}"
+
+echo "=== Drorlab smoke: embed ESM2 pooled (--pooling mean) ==="
+python "$EMBED" --model "$ESM2" --input "$EX/seq3_only.csv" \
+  --output "$OUT/embed_esm2_pooled.pth" --seq-col sequence --pooling mean "${ATTN[@]}" "${BS_EMB[@]}"
 
 echo "=== Drorlab smoke: embed ESMC / ESM3-class (CSV) ==="
 python "$EMBED" --model "$ESMC" --input "$EX/sequences_example.csv" \

@@ -182,7 +182,8 @@ REPO_ROOT=/oak/stanford/groups/rondror/users/you/FastPLMs \
 - **Output:** `.db` → SQLite; anything else → `.pth` keyed by sequence string.
 - **Attention:** Default **`--attn-backend kernels_flash`** (ANKH falls back to flex/sdpa). Use **`--attn-backend sdpa`** for strict reproducibility. See [main README § Attention Backends](../README.md#attention-backends).
 - **Dtype:** Default **`--dtype bfloat16`** (recommended for ANKH3 and most PLMs). Avoid **`float16`** on ANKH3 — wrong-tokenizer + fp16 historically produced NaNs; upstream now loads the checkpoint tokenizer automatically.
-- **Hidden states:** Optional **`--hidden-state-index N`** (layer `N` from `output_hidden_states`; `-1` = final layer). **`--store-all-hidden-states`** saves every layer when **`--full-embeddings`** is set (`.pth`/`.db` only; not `.zarr` yet). See [embedding API](../docs/embedding_api.md).
+- **Output shape:** Default is **per-residue full embeddings** (no flag needed). Pass **`--pooling mean`** (comma-separated strategies) for one vector per sequence instead.
+- **Hidden states:** Optional **`--hidden-state-index N`** (layer `N`; `-1` = final). **`--store-all-hidden-states`** saves every layer per token (default mode only; incompatible with **`--pooling`**). See [embedding API](../docs/embedding_api.md).
 - **Tokenizer:** For tokenizer models, `embed_dataset` uses **`model.tokenizer`** from the loaded checkpoint (Synthyra hub `modeling_ankh.py` loads `config._name_or_path`).
 - **E1 multi-sequence:** Comma-separated segments: all but the last = context, last = query ([E1 cookbook](../official/e1/cookbook/)). Use `--e1-combined-col` or `--e1-context-cols ... --seq-col query`. Build MSA / sampling **offline**, then CSV.
 
@@ -213,7 +214,7 @@ Each `embedding` blob is the **compact** format (same for ESM2, ESMC, E1, DPLM, 
 
 Decode with [`embedding_blob.py`](embedding_blob.py) or [`embedding_loader.py`](embedding_loader.py); see [Embedding loader](#embedding-loader).
 
-**`--full-embeddings` row layout (verified on `Synthyra/ESM2-8M`, `Synthyra/ESMplusplus_small`, `Synthyra/Profluent-E1-150M`, `Synthyra/DPLM-150M`, `Synthyra/DPLM2-150M`, `Synthyra/ANKH_base`, `Synthyra/ANKH2_large`, `Synthyra/ANKH3_large`):**
+**Per-residue row layout (default; verified on `Synthyra/ESM2-8M`, `Synthyra/ESMplusplus_small`, `Synthyra/Profluent-E1-150M`, `Synthyra/DPLM-150M`, `Synthyra/DPLM2-150M`, `Synthyra/ANKH_base`, `Synthyra/ANKH2_large`, `Synthyra/ANKH3_large`):**
 
 | Model family | Stored length `T` | Align residues (0-based row `i` → residue #`i+1`) |
 |--------------|-------------------|-----------------------------------------------------|

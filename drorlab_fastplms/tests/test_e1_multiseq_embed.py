@@ -54,7 +54,7 @@ def test_prepare_multiseq_single_segment_no_commas() -> None:
 
 @pytest.mark.gpu
 def test_e1_embed_multiseq_edges_cuda0() -> None:
-    """Load E1 on cuda:0; normalized CSV strings embed; pooled vectors finite (mirrors embed.py preprocessing)."""
+    """Pooled embed (``embed.py --pooling mean``): finite sequence-level vectors after E1 normalize."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
 
@@ -85,7 +85,7 @@ def test_e1_embed_multiseq_edges_cuda0() -> None:
             batch_size=2,
             max_len=1024,
             truncate=True,
-            full_embeddings=False,
+            full_embeddings=False,  # embed.py: pass --pooling mean
             embed_dtype=torch.float32,
             pooling_types=["mean"],
             save=False,
@@ -93,6 +93,7 @@ def test_e1_embed_multiseq_edges_cuda0() -> None:
     assert embs is not None
     for seq in sequences:
         assert seq in embs
+        assert embs[seq].ndim == 1
         assert torch.isfinite(embs[seq]).all(), f"non-finite embedding for key {seq!r}"
 
     df = pd.read_csv(_DATA_CSV)
@@ -127,6 +128,46 @@ def test_e1_embed_multiseq_edges_cuda0() -> None:
 
     assert canonical in embs_csv
     torch.testing.assert_close(embs[canonical], embs_csv[canonical], rtol=2e-3, atol=2e-3)
+
+    del model
+    torch.cuda.empty_cache()
+
+
+@pytest.mark.gpu
+def test_e1_embed_default_full_per_residue_cuda0() -> None:
+    """Default ``embed.py`` path: per-residue full embeddings (no ``--pooling``)."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    os.environ.setdefault("TQDM_DISABLE", "1")
+
+    cfg = MODEL_REGISTRY["e1"]
+    model = E1ForMaskedLM.from_pretrained(
+        cfg["fast_path"],
+        trust_remote_code=True,
+        dtype=torch.bfloat16,
+        device_map="cuda:0",
+    ).eval()
+
+    seq = "MKLLVVMM"
+    with torch.inference_mode():
+        embs = model.embed_dataset(
+            sequences=[seq],
+            tokenizer=None,
+            batch_size=1,
+            max_len=1024,
+            truncate=True,
+            full_embeddings=True,
+            embed_dtype=torch.float32,
+            pooling_types=["mean"],
+            save=False,
+        )
+    assert embs is not None
+    emb = embs[seq]
+    assert emb.ndim == 2
+    assert emb.shape[0] == len(seq) + 4
+    assert emb.shape[1] == model.config.hidden_size
+    assert torch.isfinite(emb).all()
 
     del model
     torch.cuda.empty_cache()

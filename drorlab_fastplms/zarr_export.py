@@ -24,6 +24,35 @@ except Exception:  # pragma: no cover - runtime dependency check
     zarr = None
 
 
+def _full_trimmed_zarr_flat(trimmed: np.ndarray) -> Tuple[np.ndarray, int, int]:
+    """Flatten a trimmed full embedding for Zarr ``residues`` storage.
+
+    Returns ``(flat_2d [N, H], flat_row_count N, num_hidden_states)``.
+    For a single layer, ``num_hidden_states`` is 1 and ``flat_2d`` is ``(T, H)``.
+    For all layers, input is ``(L, T, H)`` stored row-major as ``(L*T, H)``.
+    """
+    if trimmed.ndim == 2:
+        return trimmed, int(trimmed.shape[0]), 1
+    if trimmed.ndim == 3:
+        n_layers, n_tok, hidden = trimmed.shape
+        flat = np.ascontiguousarray(trimmed.reshape(n_layers * n_tok, hidden))
+        return flat, int(n_layers * n_tok), int(n_layers)
+    raise ValueError(f"Expected trimmed full embedding with 2 or 3 dims, got {trimmed.ndim}")
+
+
+def zarr_flat_to_full_embedding(flat_2d: torch.Tensor, flat_rows: int, num_hidden_states: int) -> torch.Tensor:
+    """Inverse of ``_full_trimmed_zarr_flat`` for ``EmbeddingZarrReader``."""
+    if num_hidden_states <= 1:
+        return flat_2d
+    if flat_rows % num_hidden_states != 0:
+        raise ValueError(
+            f"Cannot reshape Zarr flat rows {flat_rows} into "
+            f"{num_hidden_states} layers (not divisible)"
+        )
+    n_tok = flat_rows // num_hidden_states
+    return flat_2d.reshape(num_hidden_states, n_tok, flat_2d.shape[-1])
+
+
 class ProteinDataset(TorchDataset):
     def __init__(self, sequences: List[str]) -> None:
         self.sequences = sequences
@@ -163,9 +192,16 @@ def convert_db_to_zarr(
             continue
 
         if manifest_writer is None:
-            if emb.ndim == 2:
+            if emb.ndim == 3:
+                inferred_full = True
+                hidden = int(emb.shape[2])
+                root.attrs["store_all_hidden_states"] = True
+                root.attrs["num_hidden_states"] = int(emb.shape[0])
+            elif emb.ndim == 2:
                 inferred_full = True
                 hidden = int(emb.shape[1])
+                root.attrs.setdefault("store_all_hidden_states", False)
+                root.attrs.setdefault("num_hidden_states", 1)
             elif emb.ndim == 1:
                 inferred_full = False
                 hidden = int(emb.shape[0])
@@ -203,15 +239,20 @@ def convert_db_to_zarr(
 
         if layout == "full_embeddings":
             assert residues is not None and starts is not None and lengths is not None and manifest_writer is not None
-            arr = emb.to(torch.float32).cpu().numpy()
+            arr_np = emb.to(torch.float32).cpu().numpy()
+            if arr_np.ndim == 3:
+                n_layers, n_tok, hidden = arr_np.shape
+                arr_np = np.ascontiguousarray(arr_np.reshape(n_layers * n_tok, hidden))
+            elif arr_np.ndim != 2:
+                raise ValueError(f"Expected full embedding rank 2 or 3 in DB, got {arr_np.ndim}")
             old_n = int(residues.shape[0])
-            residues.resize((old_n + arr.shape[0], arr.shape[1]))
-            residues[old_n:old_n + arr.shape[0], :] = arr
+            residues.resize((old_n + arr_np.shape[0], arr_np.shape[1]))
+            residues[old_n:old_n + arr_np.shape[0], :] = arr_np
             old_rows = int(starts.shape[0])
             starts.resize((old_rows + 1,))
             lengths.resize((old_rows + 1,))
             starts[old_rows] = residue_cursor
-            lengths[old_rows] = int(arr.shape[0])
+            lengths[old_rows] = int(arr_np.shape[0])
             manifest_writer.writerow([row_index, seq, "", residue_cursor, int(arr.shape[0])])
             residue_cursor += int(arr.shape[0])
         else:
@@ -254,6 +295,7 @@ def export_embeddings_to_zarr(
     embed_dtype: torch.dtype,
     pooling_types: List[str],
     hidden_state_index: int = -1,
+    store_all_hidden_states: bool = False,
     num_workers: int = 0,
     timing: bool = False,
 ) -> None:
@@ -274,11 +316,15 @@ def export_embeddings_to_zarr(
     root = zarr.open_group(save_path, mode="a")
     root.attrs["layout"] = "full_embeddings" if full_embeddings else "pooled_embeddings"
     root.attrs["embed_dtype"] = str(embed_dtype)
+    root.attrs["store_all_hidden_states"] = bool(store_all_hidden_states)
+    root.attrs["hidden_state_index"] = int(hidden_state_index)
     if not full_embeddings:
         root.attrs["pooling_types"] = list(pooling_types)
 
     hidden_size = int(model.config.hidden_size)
     pooler = Pooler(pooling_types) if not full_embeddings else None
+    if tokenizer is None and getattr(model.config, "model_type", None) != "E1":
+        tokenizer = getattr(model, "tokenizer", None)
     tokenizer_mode = tokenizer is not None
     device = next(model.parameters()).device
 
@@ -314,11 +360,16 @@ def export_embeddings_to_zarr(
                 lens_batch: List[int] = []
                 for seq, emb, mask in zip(batch_seqs, emb_cpu, mask_cpu):
                     trimmed = _trim_full_embedding(emb, mask).to(torch.float32).numpy()
-                    per_seq.append(trimmed)
+                    flat, flat_rows, n_layers = _full_trimmed_zarr_flat(trimmed)
+                    if n_layers > 1:
+                        root.attrs["store_all_hidden_states"] = True
+                        root.attrs["num_hidden_states"] = n_layers
+                    elif "num_hidden_states" not in root.attrs:
+                        root.attrs["num_hidden_states"] = 1
+                    per_seq.append(flat)
                     starts_batch.append(residue_cursor)
-                    l = int(trimmed.shape[0])
-                    lens_batch.append(l)
-                    residue_cursor += l
+                    lens_batch.append(flat_rows)
+                    residue_cursor += flat_rows
 
                 if per_seq:
                     flat = np.concatenate(per_seq, axis=0) if len(per_seq) > 1 else per_seq[0]
@@ -372,6 +423,7 @@ def export_embeddings_to_zarr(
                     input_ids,
                     attention_mask,
                     hidden_state_index=hidden_state_index,
+                    store_all_hidden_states=store_all_hidden_states,
                 )
                 handle_batch(batch_seqs, residue_embeddings, attention_mask)
         else:
@@ -381,6 +433,7 @@ def export_embeddings_to_zarr(
                     batch_seqs,
                     return_attention_mask=True,
                     hidden_state_index=hidden_state_index,
+                    store_all_hidden_states=store_all_hidden_states,
                 )
                 assert isinstance(out, tuple) and len(out) == 2
                 residue_embeddings, attention_mask = out
