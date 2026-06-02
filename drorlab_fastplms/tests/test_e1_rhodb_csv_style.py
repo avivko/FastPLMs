@@ -117,7 +117,7 @@ def test_e1_batch_preparer_last_segment_is_query_mask_region() -> None:
 
 @pytest.mark.gpu
 def test_rhodb_minimal_like_full_embeddings_shape_and_query_aa_slice() -> None:
-    """Mirror ``embed.py`` E1 path: normalize multiseq, ``embed_dataset`` full, rows match tokens; AA slice = len(query)."""
+    """Mirror default ``embed.py`` E1 path (per-residue, no ``--pooling``): multiseq full rows match tokens."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
 

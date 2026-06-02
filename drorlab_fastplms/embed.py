@@ -53,6 +53,37 @@ def parse_pooling(s: str) -> list[str]:
     return [x.strip() for x in s.split(",") if x.strip()]
 
 
+def pooling_requested(pooling: str | None) -> bool:
+    return pooling is not None and bool(pooling.strip())
+
+
+def resolve_embed_output_mode(
+    pooling: str | None,
+    store_all_hidden_states: bool,
+) -> tuple[bool, list[str], str | None]:
+    """Return ``(full_embeddings, pooling_types, error_message)``."""
+    use_pooling = pooling_requested(pooling)
+
+    if store_all_hidden_states and use_pooling:
+        return (
+            False,
+            [],
+            "--store-all-hidden-states is only supported for per-residue embeddings (the default). "
+            "Pooling all layers into sequence-level vectors is not implemented. "
+            "Omit --pooling to save every layer at each token, or use --pooling with "
+            "--hidden-state-index to pool a single layer.",
+        )
+
+    if use_pooling:
+        strategies = parse_pooling(pooling)  # type: ignore[arg-type]
+        if not strategies:
+            return False, [], "--pooling was provided but no pooling strategies were parsed."
+        return False, strategies, None
+
+    # Default: per-residue full embeddings (pooling_types unused by embed_dataset).
+    return True, ["mean"], None
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Embed sequences with FastPLMs (MaskedLM + EmbeddingMixin).")
     p.add_argument("--model", required=True, help="HuggingFace model id, e.g. Synthyra/ESM2-8M")
@@ -64,16 +95,40 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--id-col", default=None, help="Optional CSV column for row ids (writes manifest next to output)")
     p.add_argument("--output", required=True, help="Output .pth, .db (SQLite), or .zarr")
-    p.add_argument("--pooling", default="mean", help="Comma-separated pooling strategies (default: mean)")
+    p.add_argument(
+        "--pooling",
+        default=None,
+        help=(
+            "Optional comma-separated pooling strategies (e.g. mean, max). "
+            "If omitted, per-residue full embeddings are saved (default)."
+        ),
+    )
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--max-len", type=int, default=2048)
-    p.add_argument("--full-embeddings", action="store_true", help="Per-residue embeddings in .pth")
     p.add_argument(
         "--attn-backend",
         default="kernels_flash",
         help="Attention backend: auto (fastest available: flash→flex→sdpa), sdpa (exact/reproducible), flex, kernels_flash (default: kernels_flash)",
     )
-    p.add_argument("--dtype", default="float16", help="Model load dtype: bfloat16, float16, float32")
+    p.add_argument(
+        "--dtype",
+        default="bfloat16",
+        help="Model load dtype: bfloat16 (recommended), float16, float32",
+    )
+    p.add_argument(
+        "--hidden-state-index",
+        type=int,
+        default=-1,
+        help="Hidden-state tuple index for pooling/embeddings (-1 = last layer, default)",
+    )
+    p.add_argument(
+        "--store-all-hidden-states",
+        action="store_true",
+        help=(
+            "Store all layer hidden states per token (default output mode; not compatible with --pooling). "
+            "Zarr stores flat L*T x H with attrs."
+        ),
+    )
     p.add_argument("--no-entrypoint-setup", action="store_true", help="Skip entrypoint_setup import")
     p.add_argument(
         "--e1-combined-col",
@@ -242,6 +297,14 @@ def main(argv: list[str] | None = None) -> int:
     use_sql = out_path.lower().endswith(".db")
     use_zarr = out_path.lower().endswith(".zarr")
 
+    full_embeddings, pooling, mode_err = resolve_embed_output_mode(
+        args.pooling,
+        args.store_all_hidden_states,
+    )
+    if mode_err is not None:
+        print(mode_err, file=sys.stderr)
+        return 2
+
     dtype = resolve_torch_dtype(args.dtype)
     device = default_device()
     load_model_t0 = time.perf_counter()
@@ -258,8 +321,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.timing:
         print(f"[timing] model_load_s={time.perf_counter() - load_model_t0:.3f}")
 
-    tokenizer = None if e1 else model.tokenizer
-    pooling = parse_pooling(args.pooling)
+    # E1: sequence mode (tokenizer=None). Tokenizer models: None lets embed_dataset use model.tokenizer
+    # (checkpoint-matched after upstream ANKH tokenizer fix).
+    tokenizer = None
 
     kwargs = dict(
         sequences=sequences,
@@ -267,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=args.batch_size,
         max_len=args.max_len,
         truncate=False if e1 else True,
-        full_embeddings=args.full_embeddings,
+        full_embeddings=full_embeddings,
         embed_dtype=torch.float32,
         pooling_types=pooling,
         save=not use_sql and not use_zarr,
@@ -275,6 +339,8 @@ def main(argv: list[str] | None = None) -> int:
         sql=use_sql,
         sql_db_path=out_path if use_sql else "embeddings.db",
         padding="longest",
+        hidden_state_index=args.hidden_state_index,
+        store_all_hidden_states=args.store_all_hidden_states,
     )
 
     sequence_to_id: dict[str, str] | None = None
@@ -336,9 +402,11 @@ def main(argv: list[str] | None = None) -> int:
                     batch_size=args.batch_size,
                     max_len=args.max_len,
                     truncate=False if e1 else True,
-                    full_embeddings=args.full_embeddings,
+                    full_embeddings=full_embeddings,
                     embed_dtype=torch.float32,
                     pooling_types=pooling,
+                    hidden_state_index=args.hidden_state_index,
+                    store_all_hidden_states=args.store_all_hidden_states,
                     timing=args.timing,
                 )
             else:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Load FastPLMs embedding artifacts from `.pth` or SQLite `.db` and map rows to per-residue indices.
 
-Verified layout for `--full-embeddings` outputs from `embed.py` (EmbeddingMixin):
+Verified layout for per-residue (default) `embed.py` outputs (EmbeddingMixin):
 
 - **ESM2 / ESMC (tokenizer models):** stored length is ``len(sequence) + 2`` (cls/bos + residues + eos).
   Per-residue rows: ``full[1:-1]`` so index ``0`` is residue #1.
@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 from typing import Dict, Iterator, List, Literal, Optional, Tuple, Union
 
+import numpy as np
 import torch
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -208,6 +209,8 @@ class EmbeddingZarrReader:
                 f"Loaded {len(self._row_to_seq)} sequences by CSV order."
             )
 
+        self._num_hidden_states = int(self._root.attrs.get("num_hidden_states", 1))
+
         if self.layout == "full_embeddings":
             self._residues = self._root["residues"]
             self._row_start = self._root["row_start"]
@@ -261,7 +264,10 @@ class EmbeddingZarrReader:
             start = int(self._row_start[row_idx])
             n = int(self._row_length[row_idx])
             arr = self._residues[start : start + n]
-            return torch.from_numpy(arr.astype("float32", copy=False))
+            flat = torch.from_numpy(np.asarray(arr, dtype=np.float32))
+            from drorlab_fastplms.zarr_export import zarr_flat_to_full_embedding
+
+            return zarr_flat_to_full_embedding(flat, n, self._num_hidden_states)
         arr = self._pooled[row_idx]
         return torch.from_numpy(arr.astype("float32", copy=False))
 
@@ -405,8 +411,17 @@ def _full_embeddings_to_residue_view(
     full_emb: torch.Tensor,
     sequence: str,
     family: ModelFamily = "auto",
+    hidden_state_index: int = -1,
 ) -> torch.Tensor:
-    """Return a residue-aligned tensor view (row i -> residue sequence[i], 0-based)."""
+    """Return a residue-aligned tensor view (row i -> residue sequence[i], 0-based).
+
+    For embeddings saved with ``store_all_hidden_states=True``, shape is
+    ``(num_layers, T, H)``; pass ``hidden_state_index`` to select a layer first.
+    """
+    if full_emb.ndim == 3:
+        if hidden_state_index == -1:
+            hidden_state_index = full_emb.shape[0] - 1
+        full_emb = full_emb[hidden_state_index]
     if full_emb.ndim != 2:
         raise ValueError(f"Expected 2D tensor (T, H), got {tuple(full_emb.shape)}")
 
@@ -529,6 +544,7 @@ def get_per_residue_embs(
     sequence: str,
     family: ModelFamily = "auto",
     residue_number_1b: ResidueSpec = None,
+    hidden_state_index: int = -1,
 ) -> torch.Tensor:
     """Get per-residue embeddings (or indexed subset) from `.db` / `.pth`.
 
@@ -555,7 +571,9 @@ def get_per_residue_embs(
     else:
         full_emb = source[sequence]
 
-    residue_emb = _full_embeddings_to_residue_view(full_emb, sequence, family=family)
+    residue_emb = _full_embeddings_to_residue_view(
+        full_emb, sequence, family=family, hidden_state_index=hidden_state_index
+    )
     return _apply_residue_number(residue_emb, residue_number_1b)
 
 
@@ -565,12 +583,15 @@ def iter_per_residue_embs(
     family: ModelFamily = "auto",
     residue_number_1b: ResidueSpec = None,
     db_batch_size: int = DEFAULT_DB_BATCH_SIZE,
+    hidden_state_index: int = -1,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     """Yield per-residue embeddings for many sequences without loading everything into memory."""
     if isinstance(source, (EmbeddingDBReader, EmbeddingZarrReader)):
         for seq, full_emb in source.iter_full_embeddings(sequences, batch_size=db_batch_size):
             yield seq, _apply_residue_number(
-                _full_embeddings_to_residue_view(full_emb, seq, family=family),
+                _full_embeddings_to_residue_view(
+                    full_emb, seq, family=family, hidden_state_index=hidden_state_index
+                ),
                 residue_number_1b,
             )
         return
@@ -580,7 +601,9 @@ def iter_per_residue_embs(
             with EmbeddingDBReader(source) as db:
                 for seq, full_emb in db.iter_full_embeddings(sequences, batch_size=db_batch_size):
                     yield seq, _apply_residue_number(
-                        _full_embeddings_to_residue_view(full_emb, seq, family=family),
+                        _full_embeddings_to_residue_view(
+                    full_emb, seq, family=family, hidden_state_index=hidden_state_index
+                ),
                         residue_number_1b,
                     )
             return
@@ -588,7 +611,9 @@ def iter_per_residue_embs(
             with EmbeddingZarrReader(source) as z:
                 for seq, full_emb in z.iter_full_embeddings(sequences, batch_size=db_batch_size):
                     yield seq, _apply_residue_number(
-                        _full_embeddings_to_residue_view(full_emb, seq, family=family),
+                        _full_embeddings_to_residue_view(
+                    full_emb, seq, family=family, hidden_state_index=hidden_state_index
+                ),
                         residue_number_1b,
                     )
             return
@@ -596,7 +621,9 @@ def iter_per_residue_embs(
         for seq in sequences:
             full_emb = pth[seq]
             yield seq, _apply_residue_number(
-                _full_embeddings_to_residue_view(full_emb, seq, family=family),
+                _full_embeddings_to_residue_view(
+                    full_emb, seq, family=family, hidden_state_index=hidden_state_index
+                ),
                 residue_number_1b,
             )
         return
@@ -604,7 +631,9 @@ def iter_per_residue_embs(
     for seq in sequences:
         full_emb = source[seq]
         yield seq, _apply_residue_number(
-            _full_embeddings_to_residue_view(full_emb, seq, family=family),
+            _full_embeddings_to_residue_view(
+                    full_emb, seq, family=family, hidden_state_index=hidden_state_index
+                ),
             residue_number_1b,
         )
 
@@ -614,6 +643,7 @@ def _iter_per_residue_embs_ordered_pairs(
     pairs: List[Tuple[str, ResidueSpec]],
     family: ModelFamily = "auto",
     db_batch_size: int = DEFAULT_DB_BATCH_SIZE,
+    hidden_state_index: int = -1,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     """Yield (sequence, tensor) in ``pairs`` order; supports duplicate sequence strings with different specs."""
     if isinstance(source, (EmbeddingDBReader, EmbeddingZarrReader)):
@@ -625,7 +655,9 @@ def _iter_per_residue_embs_ordered_pairs(
             if seq not in full_map:
                 raise KeyError(seq)
             yield seq, _apply_residue_number(
-                _full_embeddings_to_residue_view(full_map[seq], seq, family=family),
+                _full_embeddings_to_residue_view(
+                    full_map[seq], seq, family=family, hidden_state_index=hidden_state_index
+                ),
                 spec,
             )
         return
@@ -634,13 +666,21 @@ def _iter_per_residue_embs_ordered_pairs(
         if source.lower().endswith(".db"):
             with EmbeddingDBReader(source) as db:
                 yield from _iter_per_residue_embs_ordered_pairs(
-                    db, pairs, family=family, db_batch_size=db_batch_size
+                    db,
+                    pairs,
+                    family=family,
+                    db_batch_size=db_batch_size,
+                    hidden_state_index=hidden_state_index,
                 )
             return
         if source.lower().endswith(".zarr"):
             with EmbeddingZarrReader(source) as z:
                 yield from _iter_per_residue_embs_ordered_pairs(
-                    z, pairs, family=family, db_batch_size=db_batch_size
+                    z,
+                    pairs,
+                    family=family,
+                    db_batch_size=db_batch_size,
+                    hidden_state_index=hidden_state_index,
                 )
             return
 
@@ -648,7 +688,9 @@ def _iter_per_residue_embs_ordered_pairs(
         for seq, spec in pairs:
             full_emb = full[seq]
             yield seq, _apply_residue_number(
-                _full_embeddings_to_residue_view(full_emb, seq, family=family),
+                _full_embeddings_to_residue_view(
+                    full_emb, seq, family=family, hidden_state_index=hidden_state_index
+                ),
                 spec,
             )
         return
@@ -656,7 +698,9 @@ def _iter_per_residue_embs_ordered_pairs(
     for seq, spec in pairs:
         full_emb = source[seq]
         yield seq, _apply_residue_number(
-            _full_embeddings_to_residue_view(full_emb, seq, family=family),
+            _full_embeddings_to_residue_view(
+                    full_emb, seq, family=family, hidden_state_index=hidden_state_index
+                ),
             spec,
         )
 
@@ -669,6 +713,7 @@ def load_per_residue_embs(
     residue_number_1b: Optional[Union[ResidueSpecAtom, List[ResidueSpec], Tuple[ResidueSpec, ...]]] = None,
     residue_number_by_sequence: Optional[Dict[str, ResidueSpec]] = None,
     batch_size: Optional[int] = None,
+    hidden_state_index: int = -1,
 ) -> Union[torch.Tensor, Dict[str, torch.Tensor], Iterator[Tuple[str, torch.Tensor]]]:
     """Load per-residue embeddings from `.db` / `.pth` (single unified entry point).
 
@@ -690,6 +735,9 @@ def load_per_residue_embs(
     - ``None`` (default): return ``Dict[str, Tensor]`` with all requested sequences in memory.
     - ``1`` or ``>1``: return an iterator ``(sequence, tensor)``. For SQLite, ``batch_size`` is the
       DB fetch batch size (batched ``IN`` queries or ``fetchmany`` when iterating all rows).
+
+    **hidden_state_index:** when full embeddings were saved with all layers ``(L, T, H)``,
+    select which layer to strip specials from before residue indexing (default ``-1`` = last).
     """
     if residue_number_1b is not None and residue_number_by_sequence is not None:
         raise ValueError("Use only one of residue_number_1b or residue_number_by_sequence.")
@@ -707,7 +755,13 @@ def load_per_residue_embs(
             rn = residue_number_by_sequence[sequence]
         else:
             rn = residue_number_1b
-        return get_per_residue_embs(source, sequence, family=family, residue_number_1b=rn)
+        return get_per_residue_embs(
+            source,
+            sequence,
+            family=family,
+            residue_number_1b=rn,
+            hidden_state_index=hidden_state_index,
+        )
 
     # --- Per-sequence residue specs (dict or aligned list/tuple with sequences) ---
     eff_by_seq: Optional[Dict[str, ResidueSpec]] = None
@@ -750,6 +804,7 @@ def load_per_residue_embs(
                     pairs=pairs,
                     family=family,
                     db_batch_size=DEFAULT_DB_BATCH_SIZE,
+                    hidden_state_index=hidden_state_index,
                 )
             }
         return _iter_per_residue_embs_ordered_pairs(
@@ -757,6 +812,7 @@ def load_per_residue_embs(
             pairs=pairs,
             family=family,
             db_batch_size=batch_size,
+            hidden_state_index=hidden_state_index,
         )
 
     # --- Uniform residue_number_1b for many sequences ---
@@ -766,6 +822,7 @@ def load_per_residue_embs(
             family=family,
             residue_number_1b=residue_number_1b,
             db_batch_size=DEFAULT_DB_BATCH_SIZE,
+            hidden_state_index=hidden_state_index,
         ) if sequences is None else {
             seq: emb
             for seq, emb in iter_per_residue_embs(
@@ -774,6 +831,7 @@ def load_per_residue_embs(
                 family=family,
                 residue_number_1b=residue_number_1b,
                 db_batch_size=DEFAULT_DB_BATCH_SIZE,
+                hidden_state_index=hidden_state_index,
             )
         }
 
@@ -784,6 +842,7 @@ def load_per_residue_embs(
             family=family,
             residue_number_1b=residue_number_1b,
             db_batch_size=batch_size,
+            hidden_state_index=hidden_state_index,
         )
 
     if isinstance(source, (EmbeddingDBReader, EmbeddingZarrReader)):
@@ -791,7 +850,9 @@ def load_per_residue_embs(
         def _iter_db_all(reader: Union[EmbeddingDBReader, EmbeddingZarrReader]) -> Iterator[Tuple[str, torch.Tensor]]:
             for seq, full_emb in reader.iter_all_full_embeddings(batch_size=batch_size):
                 yield seq, _apply_residue_number(
-                    _full_embeddings_to_residue_view(full_emb, seq, family=family),
+                    _full_embeddings_to_residue_view(
+                    full_emb, seq, family=family, hidden_state_index=hidden_state_index
+                ),
                     residue_number_1b,
                 )
 
@@ -803,7 +864,9 @@ def load_per_residue_embs(
             with EmbeddingDBReader(path) as db:
                 for seq, full_emb in db.iter_all_full_embeddings(batch_size=batch_size):
                     yield seq, _apply_residue_number(
-                        _full_embeddings_to_residue_view(full_emb, seq, family=family),
+                        _full_embeddings_to_residue_view(
+                    full_emb, seq, family=family, hidden_state_index=hidden_state_index
+                ),
                         residue_number_1b,
                     )
 
@@ -815,7 +878,9 @@ def load_per_residue_embs(
             with EmbeddingZarrReader(path) as z:
                 for seq, full_emb in z.iter_all_full_embeddings(batch_size=batch_size):
                     yield seq, _apply_residue_number(
-                        _full_embeddings_to_residue_view(full_emb, seq, family=family),
+                        _full_embeddings_to_residue_view(
+                    full_emb, seq, family=family, hidden_state_index=hidden_state_index
+                ),
                         residue_number_1b,
                     )
 
@@ -826,7 +891,9 @@ def load_per_residue_embs(
     def _iter_map_all(m: Dict[str, torch.Tensor]) -> Iterator[Tuple[str, torch.Tensor]]:
         for seq, full_emb in m.items():
             yield seq, _apply_residue_number(
-                _full_embeddings_to_residue_view(full_emb, seq, family=family),
+                _full_embeddings_to_residue_view(
+                    full_emb, seq, family=family, hidden_state_index=hidden_state_index
+                ),
                 residue_number_1b,
             )
 
@@ -838,6 +905,7 @@ def load_all_per_residue_embs_in_memory(
     family: ModelFamily = "auto",
     residue_number_1b: ResidueSpec = None,
     db_batch_size: int = DEFAULT_DB_BATCH_SIZE,
+    hidden_state_index: int = -1,
 ) -> Dict[str, torch.Tensor]:
     """Load all entries into memory as per-residue tensors.
 
@@ -851,6 +919,7 @@ def load_all_per_residue_embs_in_memory(
             family=family,
             residue_number_1b=residue_number_1b,
             db_batch_size=db_batch_size,
+            hidden_state_index=hidden_state_index,
         )}
 
     if isinstance(source, str) and source.lower().endswith(".db"):
@@ -862,6 +931,7 @@ def load_all_per_residue_embs_in_memory(
                 family=family,
                 residue_number_1b=residue_number_1b,
                 db_batch_size=db_batch_size,
+                hidden_state_index=hidden_state_index,
             )}
     if isinstance(source, str) and source.lower().endswith(".zarr"):
         with EmbeddingZarrReader(source) as z:
@@ -872,6 +942,7 @@ def load_all_per_residue_embs_in_memory(
                 family=family,
                 residue_number_1b=residue_number_1b,
                 db_batch_size=db_batch_size,
+                hidden_state_index=hidden_state_index,
             )}
 
     if isinstance(source, str):
@@ -880,7 +951,9 @@ def load_all_per_residue_embs_in_memory(
         full = source
     return {
         seq: _apply_residue_number(
-            _full_embeddings_to_residue_view(full_emb, seq, family=family),
+            _full_embeddings_to_residue_view(
+                    full_emb, seq, family=family, hidden_state_index=hidden_state_index
+                ),
             residue_number_1b,
         )
         for seq, full_emb in full.items()

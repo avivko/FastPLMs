@@ -18,6 +18,7 @@
 # MODE:
 #   embedding_blob    — ``pytest -m embedding_blob``
 #   embedding_loader  — ``pytest -m embedding_loader``
+#   embed             — ``pytest -m embed`` (GPU tests; needs --nv)
 #   all               — full ``drorlab_fastplms/tests`` (default)
 #
 # Optional env: SIF, REPO_ROOT
@@ -37,12 +38,15 @@ case "$MODE" in
   embedding_loader)
     ARGS_STR="drorlab_fastplms/tests -m embedding_loader"
     ;;
+  embed)
+    ARGS_STR="drorlab_fastplms/tests -m embed"
+    ;;
   all)
     ARGS_STR="drorlab_fastplms/tests"
     ;;
   *)
     echo "sbatch_drorlab_pytest: unknown MODE=${MODE}" >&2
-    echo "Usage: sbatch $0 [embedding_blob|embedding_loader|all]" >&2
+    echo "Usage: sbatch $0 [embedding_blob|embedding_loader|embed|all]" >&2
     exit 1
     ;;
 esac

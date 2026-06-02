@@ -8,6 +8,7 @@ import tempfile
 import csv
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
@@ -191,8 +192,8 @@ def test_embedding_zarr_reader_full_embeddings(tmp_path: Path):
     root = zarr.open_group(str(store), mode="w")
     root.attrs["layout"] = "full_embeddings"
     root.create_array("residues", data=torch.arange(6 * 4, dtype=torch.float32).reshape(6, 4).numpy(), chunks=(6, 4))
-    root.create_array("row_start", data=[0, 3], chunks=(2,), dtype="i8")
-    root.create_array("row_length", data=[3, 3], chunks=(2,), dtype="i4")
+    root.create_array("row_start", data=np.array([0, 3], dtype=np.int64), chunks=(2,))
+    root.create_array("row_length", data=np.array([3, 3], dtype=np.int32), chunks=(2,))
     _write_manifest(
         manifest,
         [
@@ -223,8 +224,8 @@ def test_load_per_residue_from_zarr_full(tmp_path: Path):
     root = zarr.open_group(str(store), mode="w")
     root.attrs["layout"] = "full_embeddings"
     root.create_array("residues", data=full.numpy(), chunks=(len(full), 5))
-    root.create_array("row_start", data=[0], chunks=(1,), dtype="i8")
-    root.create_array("row_length", data=[len(full)], chunks=(1,), dtype="i4")
+    root.create_array("row_start", data=np.array([0], dtype=np.int64), chunks=(1,))
+    root.create_array("row_length", data=np.array([len(full)], dtype=np.int32), chunks=(1,))
     _write_manifest(
         manifest,
         [{"row_index": 0, "sequence": seq, "id": "id0", "residue_start": 0, "residue_length": len(full)}],
@@ -233,6 +234,40 @@ def test_load_per_residue_from_zarr_full(tmp_path: Path):
     out = load_per_residue_embs(str(store), sequence=seq, family="e1")
     assert out.shape == (len(seq), 5)
     assert torch.equal(out, full[2:-2])
+
+
+@pytest.mark.embedding_loader
+def test_embedding_zarr_reader_all_hidden_states(tmp_path: Path):
+    zarr = _zarr_or_skip()
+    from drorlab_fastplms.embedding_loader import EmbeddingZarrReader, load_per_residue_embs
+
+    seq = "ACDE"
+    n_layers, n_tok, hidden = 3, len(seq) + 2, 5
+    full = torch.arange(n_layers * n_tok * hidden, dtype=torch.float32).reshape(n_layers, n_tok, hidden)
+    flat = full.reshape(n_layers * n_tok, hidden)
+
+    store = tmp_path / "layers.zarr"
+    manifest = tmp_path / "layers_manifest.csv"
+    root = zarr.open_group(str(store), mode="w")
+    root.attrs["layout"] = "full_embeddings"
+    root.attrs["num_hidden_states"] = n_layers
+    root.attrs["store_all_hidden_states"] = True
+    root.create_array("residues", data=flat.numpy(), chunks=(flat.shape[0], hidden))
+    root.create_array("row_start", data=np.array([0], dtype=np.int64), chunks=(1,))
+    root.create_array("row_length", data=np.array([flat.shape[0]], dtype=np.int32), chunks=(1,))
+    _write_manifest(
+        manifest,
+        [{"row_index": 0, "sequence": seq, "id": "id0", "residue_start": 0, "residue_length": flat.shape[0]}],
+    )
+
+    with EmbeddingZarrReader(str(store)) as zr:
+        emb = zr.get_full_embedding(seq)
+        assert emb.shape == (n_layers, n_tok, hidden)
+        assert torch.equal(emb, full)
+
+    out = load_per_residue_embs(str(store), sequence=seq, family="esm_tokenizer", hidden_state_index=1)
+    assert out.shape == (len(seq), hidden)
+    assert torch.equal(out, full[1, 1:-1])
 
 
 @pytest.mark.embedding_loader

@@ -3,7 +3,7 @@
 # with PYTHONPATH=/app:${REPO_ROOT} and repo at REPO_ROOT (default /workspace/repo).
 #
 # Usage inside container:
-#   bash /workspace/repo/drorlab_fastplms/tests/run_drorlab_pytest.sh [embedding_blob|embedding_loader|all]
+#   bash /workspace/repo/drorlab_fastplms/tests/run_drorlab_pytest.sh [embedding_blob|embedding_loader|embed|all]
 #
 # See tests/README.md for docker run one-liners.
 
@@ -20,12 +20,15 @@ case "$MODE" in
   embedding_loader)
     ARGS=(drorlab_fastplms/tests -m embedding_loader)
     ;;
+  embed)
+    ARGS=(drorlab_fastplms/tests -m embed)
+    ;;
   all)
     ARGS=(drorlab_fastplms/tests)
     ;;
   *)
     echo "run_drorlab_pytest.sh: unknown MODE=${MODE}" >&2
-    echo "Usage: $0 [embedding_blob|embedding_loader|all]" >&2
+    echo "Usage: $0 [embedding_blob|embedding_loader|embed|all]" >&2
     exit 1
     ;;
 esac

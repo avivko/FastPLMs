@@ -13,8 +13,10 @@ FastPLMs/
     dplm2/                   # DPLM2 (ByteDance)
     e1/                      # E1 (Profluent Bio)
     esm2/                    # ESM2 (Meta AI)
-    esm_plusplus/            # ESM++ / ESMC (EvolutionaryScale)
+    esm3/                    # ESM3 (Biohub)
+    esm_plusplus/            # ESM++ / ESMC (Biohub)
     esmfold/                 # ESMFold (structure prediction)
+    esmfold2/                # ESMFold2 / ESMFold2-Fast (structure prediction)
     attention.py             # Shared attention backend code
     embedding_mixin.py       # Shared pooling & embedding utilities
     weight_parity_utils.py   # Weight comparison utilities
@@ -23,15 +25,14 @@ FastPLMs/
     boltz/                   # Official Boltz
     e1/                      # Official E1
     dplm/                    # Official DPLM
-    esm/                     # Official EvolutionaryScale ESM (sys.path-injected, not pip-installed)
-    transformers/            # Official HF transformers
+    esm/                     # Official Biohub ESM (sys.path-injected, not pip-installed)
   entrypoint_setup.py        # PyTorch runtime config
   testing/                   # Test suite + benchmarks
     official/                # Official model loaders for compliance / parity
     test_parity.py           # Rigorous per-family parity suite
   Dockerfile                 # Monolithic image (legacy)
   Dockerfile.base            # Shared base image (per-family layout)
-  Dockerfile.<family>        # One per family: esm2, esm_plusplus, e1, dplm, dplm2, ankh
+  Dockerfile.<family>        # One per family: esm2, esm_plusplus, esm3, esmfold2, e1, dplm, dplm2, ankh
   build_images.sh            # Builds base + selected family images
   update_HF.py               # Pushes composite modeling files + weights to HF Hub
   docs/                      # Documentation
@@ -42,7 +43,7 @@ Each model family lives in its own package directory containing:
 | File | Purpose |
 |------|---------|
 | `modeling_*.py` | HuggingFace-compatible `PreTrainedModel` + `PretrainedConfig` subclasses |
-| `get_*_weights.py` | Script to convert official checkpoints to FastPLM format |
+| `get_weights.py` | Script to convert official checkpoints to FastPLM format |
 | `README.md` | Per-model HuggingFace card README |
 | `LICENSE` | Per-model license file |
 | `__init__.py` | Package init (often minimal; models load via `trust_remote_code`) |
@@ -90,7 +91,7 @@ See [Embedding & Pooling API](embedding_api.md) for full details.
 
 ## Attention Backend System
 
-All models share a common attention backend abstraction controlled by `config.attn_backend`. Four backends are available:
+Most models share a common attention backend abstraction controlled by `config.attn_backend`. Four backends are available:
 
 | Backend | Key | Numerics | Speed |
 |---------|-----|----------|-------|
@@ -106,6 +107,7 @@ Each model's attention layer stores an `AttentionBackend` enum and dispatches ac
 - At load time, every family accepts `config.attn_backend = "..."` before `from_pretrained`.
 - At runtime, every family exposes a mutable `model.attn_backend` property whose setter propagates to every attention submodule. Use this to benchmark backends on the same weights without reloading.
 - Exception: ANKH silently resolves `kernels_flash` to `flex` (or `sdpa`), because T5 relative position bias is incompatible with the flash kernels.
+- Exception: ESM3 supports `sdpa` and `flex` in the FastPLMs wrapper.
 
 ## Entrypoint Setup
 
@@ -126,13 +128,13 @@ There are two coexisting layouts.
 
 ### Per-family layout (recommended)
 
-A shared base image plus one image per model family. This isolates conflicting native deps (notably EvolutionaryScale `esm` vs `fair-esm`, and DPLM's torchtext pin) so each family can be tested against its own native reference without breaking the others.
+A shared base image plus one image per model family. This isolates conflicting native deps (notably Biohub `esm` vs `fair-esm`, and DPLM's torchtext pin) so each family can be tested against its own native reference without breaking the others.
 
 - `Dockerfile.base` produces `fastplms-base`: CUDA 12.8, Python 3.12, PyTorch 2.11.0, transformers, FastPLMs source at `/app`. No native reference packages.
-- `Dockerfile.<family>` (esm2, esm_plusplus, e1, dplm, dplm2, ankh) layers on top of `fastplms-base` and installs only that family's native reference deps.
+- `Dockerfile.<family>` (esm2, esm_plusplus, esm3, esmfold2, e1, dplm, dplm2, ankh) layers on top of `fastplms-base` and installs only that family's native reference deps.
 - `build_images.sh` is a convenience script that builds the base then any subset of family images.
 
-`testing/official/<family>.py` provides the `load_official_model(...)` wrapper that the parity tests call. For ESM++, the EvolutionaryScale `esm` package itself is **not** pip-installed (it pins `transformers<4.53.0`); instead `testing/official/__init__.py` injects the in-tree `official/esm` submodule onto `sys.path` at import time.
+`testing/official/<family>.py` provides the `load_official_model(...)` wrapper that the parity tests call. For ESM++ and ESM3, the Biohub `esm` package itself is **not** pip-installed (it depends on a Biohub `transformers` fork); instead `testing/official/__init__.py` injects the in-tree `official/esm` submodule onto `sys.path` at import time.
 
 ### Monolithic layout (legacy)
 
@@ -149,7 +151,7 @@ Both layouts use:
 
 ## Weight Conversion
 
-Each model family has a `get_*_weights.py` script that:
+Each model family has a `get_weights.py` script that:
 
 1. Loads the official checkpoint (from HuggingFace or a local file)
 2. Remaps parameter names and shapes to match the FastPLM architecture
