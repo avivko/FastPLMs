@@ -8,6 +8,7 @@ import tempfile
 import csv
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
@@ -191,8 +192,8 @@ def test_embedding_zarr_reader_full_embeddings(tmp_path: Path):
     root = zarr.open_group(str(store), mode="w")
     root.attrs["layout"] = "full_embeddings"
     root.create_array("residues", data=torch.arange(6 * 4, dtype=torch.float32).reshape(6, 4).numpy(), chunks=(6, 4))
-    root.create_array("row_start", data=[0, 3], chunks=(2,), dtype="i8")
-    root.create_array("row_length", data=[3, 3], chunks=(2,), dtype="i4")
+    root.create_array("row_start", data=np.array([0, 3], dtype=np.int64), chunks=(2,))
+    root.create_array("row_length", data=np.array([3, 3], dtype=np.int32), chunks=(2,))
     _write_manifest(
         manifest,
         [
@@ -223,8 +224,8 @@ def test_load_per_residue_from_zarr_full(tmp_path: Path):
     root = zarr.open_group(str(store), mode="w")
     root.attrs["layout"] = "full_embeddings"
     root.create_array("residues", data=full.numpy(), chunks=(len(full), 5))
-    root.create_array("row_start", data=[0], chunks=(1,), dtype="i8")
-    root.create_array("row_length", data=[len(full)], chunks=(1,), dtype="i4")
+    root.create_array("row_start", data=np.array([0], dtype=np.int64), chunks=(1,))
+    root.create_array("row_length", data=np.array([len(full)], dtype=np.int32), chunks=(1,))
     _write_manifest(
         manifest,
         [{"row_index": 0, "sequence": seq, "id": "id0", "residue_start": 0, "residue_length": len(full)}],
