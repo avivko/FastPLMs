@@ -179,7 +179,8 @@ REPO_ROOT=/oak/stanford/groups/rondror/users/you/FastPLMs \
 ## `embed.py` (reference)
 
 - **Input:** CSV (**`--seq-col` required** for typical CSV; optional **`--id-col`** → manifest next to output for `.pth`) or FASTA (**no `--seq-col`**). E1 CSV with **`--e1-combined-col`** only may omit **`--seq-col`**.
-- **Output:** `.db` → SQLite; anything else → `.pth` keyed by sequence string.
+- **Output:** `.db` → SQLite; `.zarr` → Zarr + `*_manifest.csv`; other extensions → `.pth` keyed by sequence string.
+- **Zarr chunking:** Default **`--zarr-chunk-target-mb 96`** (~96 MiB per `residues` chunk; for H=2560 that is `(16384, H)` vs legacy `(2048, H)`). **`--zarr-index-chunk-rows 262144`** for `row_start`/`row_length`. **Resume** on an existing store keeps original chunks; only **new** arrays use the requested sizes.
 - **Attention:** Default **`--attn-backend kernels_flash`** (ANKH falls back to flex/sdpa). Use **`--attn-backend sdpa`** for strict reproducibility. See [main README § Attention Backends](../README.md#attention-backends).
 - **Dtype:** Default **`--dtype bfloat16`** (recommended for ANKH3 and most PLMs). Avoid **`float16`** on ANKH3 — wrong-tokenizer + fp16 historically produced NaNs; upstream now loads the checkpoint tokenizer automatically.
 - **Output shape:** Default is **per-residue full embeddings** (no flag needed). Pass **`--pooling mean`** (comma-separated strategies) for one vector per sequence instead.

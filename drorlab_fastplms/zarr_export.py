@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import os
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
@@ -21,6 +22,58 @@ try:
     import zarr
 except Exception:  # pragma: no cover - runtime dependency check
     zarr = None
+
+# Default ~96 MiB per ``residues`` chunk (float32 row = 4 * hidden_size bytes).
+DEFAULT_ZARR_TARGET_CHUNK_BYTES = 96 * 1024 * 1024
+DEFAULT_ZARR_INDEX_CHUNK_ROWS = 262_144
+MIN_ZARR_RESIDUE_CHUNK_ROWS = 2048
+MAX_ZARR_RESIDUE_CHUNK_ROWS = 65_536
+# Legacy defaults (pre-2026 chunk tuning); used only if attrs missing on resume.
+LEGACY_ZARR_RESIDUE_CHUNK_ROWS = 2048
+LEGACY_ZARR_INDEX_CHUNK_ROWS = 16_384
+
+
+@dataclass(frozen=True)
+class ZarrChunkConfig:
+    """Chunk shapes for new Zarr arrays. Existing arrays keep their creation-time chunks."""
+
+    target_chunk_bytes: int = DEFAULT_ZARR_TARGET_CHUNK_BYTES
+    index_chunk_rows: int = DEFAULT_ZARR_INDEX_CHUNK_ROWS
+
+    def residue_chunk_rows(self, hidden_size: int) -> int:
+        if hidden_size <= 0:
+            raise ValueError(f"hidden_size must be positive, got {hidden_size}")
+        bytes_per_row = hidden_size * 4  # f4
+        raw_rows = max(1, self.target_chunk_bytes // bytes_per_row)
+        rows = _round_up_power_of_two(raw_rows)
+        return int(min(MAX_ZARR_RESIDUE_CHUNK_ROWS, max(MIN_ZARR_RESIDUE_CHUNK_ROWS, rows)))
+
+    def residues_chunks(self, hidden_size: int) -> Tuple[int, int]:
+        return (self.residue_chunk_rows(hidden_size), hidden_size)
+
+    def index_chunks(self) -> Tuple[int]:
+        return (self.index_chunk_rows,)
+
+
+def _round_up_power_of_two(n: int) -> int:
+    if n <= 1:
+        return 1
+    p = 1
+    while p < n:
+        p <<= 1
+    return p
+
+
+def zarr_chunk_config_from_target_mb(
+    target_mb: float,
+    index_chunk_rows: int = DEFAULT_ZARR_INDEX_CHUNK_ROWS,
+) -> ZarrChunkConfig:
+    if target_mb <= 0:
+        raise ValueError(f"--zarr-chunk-target-mb must be positive, got {target_mb}")
+    return ZarrChunkConfig(
+        target_chunk_bytes=int(target_mb * 1024 * 1024),
+        index_chunk_rows=index_chunk_rows,
+    )
 
 
 def _full_trimmed_zarr_flat(trimmed: np.ndarray) -> Tuple[np.ndarray, int, int]:
@@ -156,14 +209,19 @@ def convert_db_to_zarr(
     manifest_path: Optional[str] = None,
     batch_size: int = 2048,
     timing: bool = False,
+    zarr_chunks: Optional[ZarrChunkConfig] = None,
 ) -> int:
     """Convert SQLite `.db` embeddings into drorlab `.zarr` format (append/resume safe)."""
     _ensure_zarr()
+    chunk_cfg = zarr_chunks or ZarrChunkConfig()
     if manifest_path is None:
         manifest_path = default_manifest_path_for_zarr(zarr_path)
 
     seen = _load_manifest_sequences(manifest_path)
     root = zarr.open_group(zarr_path, mode="a")
+    if "zarr_chunk_target_bytes" not in root.attrs:
+        root.attrs["zarr_chunk_target_bytes"] = int(chunk_cfg.target_chunk_bytes)
+        root.attrs["zarr_index_chunk_rows"] = int(chunk_cfg.index_chunk_rows)
     manifest_f = None
     manifest_writer = None
     row_count_written = 0
@@ -211,15 +269,31 @@ def convert_db_to_zarr(
 
             manifest_f, manifest_writer = _open_manifest(manifest_path, full_embeddings=(layout == "full_embeddings"))
             if layout == "full_embeddings":
-                residues = _ensure_array(root, "residues", shape=(0, hidden), chunks=(2048, hidden), dtype="f4")
-                starts = _ensure_array(root, "row_start", shape=(0,), chunks=(16384,), dtype="i8")
-                lengths = _ensure_array(root, "row_length", shape=(0,), chunks=(16384,), dtype="i4")
+                residues = _ensure_array(
+                    root,
+                    "residues",
+                    shape=(0, hidden),
+                    chunks=chunk_cfg.residues_chunks(hidden),
+                    dtype="f4",
+                )
+                starts = _ensure_array(
+                    root, "row_start", shape=(0,), chunks=chunk_cfg.index_chunks(), dtype="i8"
+                )
+                lengths = _ensure_array(
+                    root, "row_length", shape=(0,), chunks=chunk_cfg.index_chunks(), dtype="i4"
+                )
                 residue_cursor = int(residues.shape[0])
                 row_index = int(starts.shape[0])
             else:
                 pooled_arr = _maybe_get_array(root, "pooled")
                 if pooled_arr is None:
-                    pooled_arr = _ensure_array(root, "pooled", shape=(0, hidden), chunks=(2048, hidden), dtype="f4")
+                    pooled_arr = _ensure_array(
+                        root,
+                        "pooled",
+                        shape=(0, hidden),
+                        chunks=chunk_cfg.residues_chunks(hidden),
+                        dtype="f4",
+                    )
                 row_index = int(pooled_arr.shape[0])
         else:
             if layout == "full_embeddings":
@@ -243,7 +317,7 @@ def convert_db_to_zarr(
             lengths.resize((old_rows + 1,))
             starts[old_rows] = residue_cursor
             lengths[old_rows] = int(arr_np.shape[0])
-            manifest_writer.writerow([row_index, seq, "", residue_cursor, int(arr.shape[0])])
+            manifest_writer.writerow([row_index, seq, "", residue_cursor, int(arr_np.shape[0])])
             residue_cursor += int(arr.shape[0])
         else:
             assert pooled_arr is not None and manifest_writer is not None
@@ -288,6 +362,7 @@ def export_embeddings_to_zarr(
     store_all_hidden_states: bool = False,
     num_workers: int = 0,
     timing: bool = False,
+    zarr_chunks: Optional[ZarrChunkConfig] = None,
 ) -> None:
     _ensure_zarr()
     assert len(sequences) > 0, "No sequences provided."
@@ -303,15 +378,27 @@ def export_embeddings_to_zarr(
     if len(to_embed) == 0:
         return
 
+    chunk_cfg = zarr_chunks or ZarrChunkConfig()
     root = zarr.open_group(save_path, mode="a")
     root.attrs["layout"] = "full_embeddings" if full_embeddings else "pooled_embeddings"
     root.attrs["embed_dtype"] = str(embed_dtype)
     root.attrs["store_all_hidden_states"] = bool(store_all_hidden_states)
     root.attrs["hidden_state_index"] = int(hidden_state_index)
+    if "zarr_chunk_target_bytes" not in root.attrs:
+        root.attrs["zarr_chunk_target_bytes"] = int(chunk_cfg.target_chunk_bytes)
+        root.attrs["zarr_index_chunk_rows"] = int(chunk_cfg.index_chunk_rows)
     if not full_embeddings:
         root.attrs["pooling_types"] = list(pooling_types)
 
     hidden_size = int(model.config.hidden_size)
+    if timing or len(to_embed) > 0:
+        r_rows = chunk_cfg.residue_chunk_rows(hidden_size)
+        print(
+            f"[zarr] chunk target ~{chunk_cfg.target_chunk_bytes // (1024 * 1024)} MiB; "
+            f"residues chunks=({r_rows}, {hidden_size}), "
+            f"index chunks=({chunk_cfg.index_chunk_rows},) "
+            f"(existing arrays unchanged on resume)"
+        )
     pooler = Pooler(pooling_types) if not full_embeddings else None
     if tokenizer is None and getattr(model.config, "model_type", None) != "E1":
         tokenizer = getattr(model, "tokenizer", None)
@@ -321,9 +408,19 @@ def export_embeddings_to_zarr(
     manifest_f, manifest_writer = _open_manifest(manifest_path, full_embeddings=full_embeddings)
     try:
         if full_embeddings:
-            residues = _ensure_array(root, "residues", shape=(0, hidden_size), chunks=(2048, hidden_size), dtype="f4")
-            starts = _ensure_array(root, "row_start", shape=(0,), chunks=(16384,), dtype="i8")
-            lengths = _ensure_array(root, "row_length", shape=(0,), chunks=(16384,), dtype="i4")
+            residues = _ensure_array(
+                root,
+                "residues",
+                shape=(0, hidden_size),
+                chunks=chunk_cfg.residues_chunks(hidden_size),
+                dtype="f4",
+            )
+            starts = _ensure_array(
+                root, "row_start", shape=(0,), chunks=chunk_cfg.index_chunks(), dtype="i8"
+            )
+            lengths = _ensure_array(
+                root, "row_length", shape=(0,), chunks=chunk_cfg.index_chunks(), dtype="i4"
+            )
             row_count = int(starts.shape[0])
             residue_cursor = int(residues.shape[0])
         else:
@@ -383,7 +480,13 @@ def export_embeddings_to_zarr(
                 pooled_arr = _maybe_get_array(root, "pooled")
                 if pooled_arr is None:
                     out_dim = int(pooled_t.shape[1])
-                    pooled_arr = _ensure_array(root, "pooled", shape=(0, out_dim), chunks=(2048, out_dim), dtype="f4")
+                    pooled_arr = _ensure_array(
+                        root,
+                        "pooled",
+                        shape=(0, out_dim),
+                        chunks=chunk_cfg.residues_chunks(out_dim),
+                        dtype="f4",
+                    )
                 old_n = pooled_arr.shape[0]
                 n_new = int(pooled_t.shape[0])
                 pooled_arr.resize((old_n + n_new, pooled_arr.shape[1]))

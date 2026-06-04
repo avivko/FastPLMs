@@ -46,6 +46,7 @@ from drorlab_fastplms.zarr_export import (
     convert_db_to_zarr,
     default_db_path_for_zarr,
     export_embeddings_to_zarr,
+    zarr_chunk_config_from_target_mb,
 )
 from drorlab_fastplms.embed_stage import clear_embed_output_at
 
@@ -181,6 +182,24 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     p.add_argument(
+        "--zarr-chunk-target-mb",
+        type=float,
+        default=96.0,
+        help=(
+            "Target MiB per Zarr residues chunk for new arrays (default: 96). "
+            "Larger values reduce inode count; existing stores keep their original chunks on resume."
+        ),
+    )
+    p.add_argument(
+        "--zarr-index-chunk-rows",
+        type=int,
+        default=262144,
+        help=(
+            "Zarr chunk size along row_start/row_length for new stores (default: 262144). "
+            "Ignored when those arrays already exist."
+        ),
+    )
+    p.add_argument(
         "--overwrite-no-resume",
         action="store_true",
         help=(
@@ -305,6 +324,16 @@ def main(argv: list[str] | None = None) -> int:
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     use_sql = out_path.lower().endswith(".db")
     use_zarr = out_path.lower().endswith(".zarr")
+    zarr_chunks = None
+    if use_zarr:
+        try:
+            zarr_chunks = zarr_chunk_config_from_target_mb(
+                args.zarr_chunk_target_mb,
+                index_chunk_rows=args.zarr_index_chunk_rows,
+            )
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 2
 
     if args.overwrite_no_resume:
         removed = clear_embed_output_at(out_path)
@@ -406,6 +435,7 @@ def main(argv: list[str] | None = None) -> int:
                             manifest_path=os.path.splitext(out_path.rstrip("/"))[0] + "_manifest.csv",
                             batch_size=2048,
                             timing=args.timing,
+                            zarr_chunks=zarr_chunks,
                         )
                 manifest = os.path.splitext(out_path.rstrip("/"))[0] + "_manifest.csv"
                 export_embeddings_to_zarr(
@@ -424,6 +454,7 @@ def main(argv: list[str] | None = None) -> int:
                     hidden_state_index=args.hidden_state_index,
                     store_all_hidden_states=args.store_all_hidden_states,
                     timing=args.timing,
+                    zarr_chunks=zarr_chunks,
                 )
             else:
                 model.embed_dataset(**kwargs)
